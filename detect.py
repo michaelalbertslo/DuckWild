@@ -13,7 +13,7 @@ Writes to:
 
 Requirements:
 uv pip install speciesnet
-Run once on some test files before deployment to install weights, etc.
+Run once on some test files before edge node deployment to install weights, etc.
 """
 
 import argparse, csv, json, os, shlex, subprocess, tempfile
