@@ -12,7 +12,8 @@ Writes to:
   - predictions.csv         (compact summary: filename,species,confidence)
 
 Requirements:
-uv pip install speciesnet
+make a directory on the pi
+uv pip install speciesnet - will need uv and pip and python and such installed
 Run once on some test files before edge node deployment to install weights, etc.
 """
 
