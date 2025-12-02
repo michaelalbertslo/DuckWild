@@ -4,4 +4,12 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["LoRaRF"]
+
+[tool.uv.sources]
+LoRaRF = { git = "https://github.com/chandrawi/LoRaRF-Python" }
+
+[tool.uv]
+override-dependencies = [
+    "RPi.GPIO; sys_platform == 'never'",
+]
