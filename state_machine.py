@@ -135,7 +135,7 @@ class State(Enum):
     ERROR = auto()
 
 
-class DetectorDuckFSM:
+class DuckWildFSM:
     def __init__(self, duck_id: int):
         self.state = State.IDLE
         self.duck_id = duck_id
@@ -191,7 +191,7 @@ class DetectorDuckFSM:
             self.state = State.IDLE
 
     # ------------------------
-    # Packet processing stubs
+    # Packet processing stubs, need work still
     # ------------------------
 
     def receive_packet(self, raw: bytes):
@@ -238,7 +238,7 @@ class DetectorDuckFSM:
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     duck_id = secrets.randbits(64)
-    fsm = DetectorDuckFSM(duck_id)
+    fsm = DuckWildFSM(duck_id)
     fsm.run_forever()
 
 if __name__ == "__main__":
