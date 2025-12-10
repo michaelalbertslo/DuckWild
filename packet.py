@@ -18,7 +18,7 @@ class Data(ABC):
         pass
 
 
-# https:#github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L37
+# https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L37
 class AckData(Data):
     pairs: list[tuple[int, int]]
 
@@ -117,6 +117,8 @@ class Topic(Enum):
     BMP180 = 0xFE
     # Max supported topics
     MAX = 0xFF
+    # Our custom topic
+    WILD = 126
 
 
 # https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/include/DuckTypes.h#L8
@@ -133,6 +135,11 @@ class DuckType(Enum):
     DETECTOR = 0x04
 
 
+class Duids(Enum):
+    PAPA = 0x0000000000000000
+    BROADCAST = 0xFFFFFFFFFFFFFFFF
+
+
 # https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L126
 class CdpPacket:
     def __init__(
@@ -141,7 +148,7 @@ class CdpPacket:
         dduid: int,
         muid: int,
         topic: Topic,
-        duck_type: int,
+        duck_type: DuckType | int,
         hop_count: int,
         data: Data | None,
     ):
