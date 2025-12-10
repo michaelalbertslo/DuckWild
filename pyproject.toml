@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-LoRaRF = { git = "https://github.com/chandrawi/LoRaRF-Python", rev = "76a1cda9291abfe9e6c6a52ae4e5463188a893d1" }
+LoRaRF = { url = "https://www.waveshare.net/w/upload/a/a1/Sx126x_lorawan_hat_code.zip", subdirectory = "python/lora" }
 
 [tool.uv]
 override-dependencies = [
