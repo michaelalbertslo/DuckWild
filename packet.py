@@ -69,6 +69,9 @@ class UnknownData(Data):
     def encode(self) -> bytes:
         return self.data
 
+    def __str__(self):
+        return str(self.data)
+
 
 # https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L56
 class CommandTypes(Enum):
