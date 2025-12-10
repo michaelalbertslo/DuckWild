@@ -18,7 +18,7 @@ class Data(ABC):
         pass
 
 
-# https:#github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L37
+# https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L37
 class AckData(Data):
     pairs: list[tuple[int, int]]
 
@@ -135,7 +135,7 @@ class DuckType(Enum):
     DETECTOR = 0x04
 
 
-class Muids(Enum):
+class Duids(Enum):
     PAPA = 0x0000000000000000
     BROADCAST = 0xFFFFFFFFFFFFFFFF
 
