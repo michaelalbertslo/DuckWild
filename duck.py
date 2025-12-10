@@ -90,6 +90,7 @@ class Duck:
             self.duid, dduid, muid, topic, self.type, INITIAL_HOP_COUNT, data
         )
         raw_packet = packet.encode()
+        print(raw_packet)
         self.lora.write(list(raw_packet), len(raw_packet))
         self.lora.endPacket()
         # Wait until modulation process for transmitting packet finish
@@ -111,6 +112,10 @@ class Duck:
                     while self.lora.available() > 0:
                         message.append(self.lora.read())
                     print(message)
-                    cdp_packet = CdpPacket.decode(bytes(message))
-                    self.on_received(cdp_packet)
+                    try:
+                        cdp_packet = CdpPacket.decode(bytes(message))
+                        self.on_received(cdp_packet)
+                    except:
+                        print("Failed to decode message!")
                 time.sleep(RECEIVE_DELAY)
+            self.lora.standby()
