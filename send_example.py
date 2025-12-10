@@ -12,8 +12,9 @@ class SendDuck(Duck):
         super().__init__(DuckType.UNKNOWN, self.DUID, 1)
 
     def tick(self):
+        print("sending")
         self.send(ReceiveDuck.DUID, Topic.WILD, UnknownData(b"hello there!"))
-        print("tick!")
+        print("sent")
 
 
 if __name__ == "__main__":
