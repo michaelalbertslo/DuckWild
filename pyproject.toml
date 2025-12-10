@@ -4,10 +4,14 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["LoRaRF"]
+dependencies = [
+    "LoRaRF",
+    "gpiod>=2.4.0",
+    "rpi-lgpio>=0.6",
+]
 
 [tool.uv.sources]
-LoRaRF = { git = "https://github.com/chandrawi/LoRaRF-Python" }
+LoRaRF = { git = "https://github.com/chandrawi/LoRaRF-Python", rev = "76a1cda9291abfe9e6c6a52ae4e5463188a893d1" }
 
 [tool.uv]
 override-dependencies = [

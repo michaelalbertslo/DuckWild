@@ -14,3 +14,8 @@ class SendDuck(Duck):
     def tick(self):
         self.send(ReceiveDuck.DUID, Topic.WILD, UnknownData(b"hello there!"))
         print("tick!")
+
+
+if __name__ == "__main__":
+    duck = SendDuck()
+    duck.run()

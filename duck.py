@@ -3,7 +3,7 @@ import random
 import time
 from collections import deque
 
-from LoRaRF import LoRaGpio, LoRaSpi, SX126x
+from LoRaRF import SX126x
 
 from packet import CdpPacket, Data, DuckType, Topic
 
@@ -19,15 +19,19 @@ class Duck:
         self.muids_seen = deque(maxlen=100)
         self.tps = tps
 
-        # Begin LoRa radio with connected SPI bus and IO pins (cs and reset) on GPIO
-        # SPI is defined by bus ID and cs ID and IO pins defined by chip and offset number
-        spi = LoRaSpi(0, 0)
-        cs = LoRaGpio(0, 8)
-        reset = LoRaGpio(0, 24)
-        busy = LoRaGpio(0, 23)
-        self.lora = SX126x(spi, cs, reset, busy)
+        busId = 0
+        csId = 0
+        resetPin = 18
+        busyPin = 20
+        irqPin = 16
+        txenPin = 6
+        rxenPin = -1
+
+        self.lora = SX126x()
         print("Begin LoRa radio")
-        if not self.lora.begin():
+        if not self.lora.begin(
+            busId, csId, resetPin, busyPin, irqPin, txenPin, rxenPin
+        ):
             raise Exception("Something wrong, can't begin LoRa radio")
 
         # Configure LoRa to use TCXO with DIO3 as control
@@ -71,7 +75,7 @@ class Duck:
             "from",
             packet.sduid,
             ":",
-            packet.message,
+            packet.data,
         )
 
     def send(self, dduid: int, topic: Topic, data: Data):
