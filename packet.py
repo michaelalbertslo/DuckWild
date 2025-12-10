@@ -148,7 +148,7 @@ class CdpPacket:
         dduid: int,
         muid: int,
         topic: Topic,
-        duck_type: DuckType | int,
+        duck_type: DuckType,
         hop_count: int,
         data: Data | None,
     ):
@@ -184,6 +184,15 @@ class CdpPacket:
             data_raw = self.data.encode()
         else:
             data_raw = b""
+        print(
+            self.sduid,
+            self.dduid,
+            self.muid,
+            self.topic.value,
+            self.duck_type.value,
+            self.hop_count,
+            crc32(data_raw),
+        )
         return (
             struct.pack(
                 "!QQLBBBL",
@@ -191,7 +200,7 @@ class CdpPacket:
                 self.dduid,
                 self.muid,
                 self.topic.value,
-                self.duck_type,
+                self.duck_type.value,
                 self.hop_count,
                 crc32(data_raw),
             )

@@ -3,7 +3,7 @@ import random
 import time
 from collections import deque
 
-from LoRaRF import LoRaGpio, LoRaSpi, SX126x
+from LoRaRF import SX126x
 
 from packet import CdpPacket, Data, DuckType, Topic
 
@@ -19,20 +19,26 @@ class Duck:
         self.muids_seen = deque(maxlen=100)
         self.tps = tps
 
-        # Begin LoRa radio with connected SPI bus and IO pins (cs and reset) on GPIO
-        # SPI is defined by bus ID and cs ID and IO pins defined by chip and offset number
-        spi = LoRaSpi(0, 0)
-        cs = LoRaGpio(0, 8)
-        reset = LoRaGpio(0, 24)
-        busy = LoRaGpio(0, 23)
-        self.lora = SX126x(spi, cs, reset, busy)
+        busId = 0
+        csId = 0
+        resetPin = 18
+        busyPin = 20
+        irqPin = 16
+        txenPin = 6
+        rxenPin = -1
+
+        self.lora = SX126x()
         print("Begin LoRa radio")
-        if not self.lora.begin():
+        if not self.lora.begin(
+            busId, csId, resetPin, busyPin, irqPin, txenPin, rxenPin
+        ):
             raise Exception("Something wrong, can't begin LoRa radio")
 
+        self.lora.setDio2RfSwitch()
+
         # Configure LoRa to use TCXO with DIO3 as control
-        print("Set RF module to use TCXO as clock reference")
-        self.lora.setDio3TcxoCtrl(self.lora.DIO3_OUTPUT_1_8, self.lora.TCXO_DELAY_10)
+        # print("Set RF module to use TCXO as clock reference")
+        # self.lora.setDio3TcxoCtrl(self.lora.DIO3_OUTPUT_1_8, self.lora.TCXO_DELAY_10)
 
         # Set frequency to 915 Mhz
         print("Set frequency to 915 Mhz")
@@ -62,7 +68,7 @@ class Duck:
 
         # Set syncronize word for private network (0x1424)
         print("Set syncronize word to 0x1424")
-        self.lora.setSyncWord(0x1424)
+        self.lora.setSyncWord(0x3444)
 
     def on_received(self, packet: CdpPacket):
         print(
@@ -71,19 +77,20 @@ class Duck:
             "from",
             packet.sduid,
             ":",
-            packet.message,
+            packet.data,
         )
 
     def send(self, dduid: int, topic: Topic, data: Data):
         # Transmit message and counter
-        while muid := random.getrandbits(32) not in self.muids_seen:
+        while (muid := random.getrandbits(32)) in self.muids_seen:
             pass
         # write() method must be placed between beginPacket() and endPacket()
         self.lora.beginPacket()
         packet = CdpPacket(
             self.duid, dduid, muid, topic, self.type, INITIAL_HOP_COUNT, data
         )
-        self.lora.write([packet], 1)
+        raw_packet = packet.encode()
+        self.lora.write(list(raw_packet), len(raw_packet))
         self.lora.endPacket()
         # Wait until modulation process for transmitting packet finish
         self.lora.wait()
@@ -103,6 +110,7 @@ class Duck:
                     message = bytearray()
                     while self.lora.available() > 0:
                         message.append(self.lora.read())
+                    print(message)
                     cdp_packet = CdpPacket.decode(bytes(message))
                     self.on_received(cdp_packet)
                 time.sleep(RECEIVE_DELAY)
