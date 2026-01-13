@@ -2,8 +2,12 @@ import argparse
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from picamera2 import Picamera2
+if TYPE_CHECKING:
+    from picamera2 import Picamera2
+else:
+    from sys_modules.picamera2 import Picamera2
 
 try:
     import RPi.GPIO as GPIO
