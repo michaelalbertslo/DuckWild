@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-LoRaRF = { url = "https://www.waveshare.net/w/upload/a/a1/Sx126x_lorawan_hat_code.zip", subdirectory = "python/lora" }
+LoRaRF = { path = "./vendor/sx126x_lorawan_hat_code/python/lora" }
 
 [tool.uv]
 override-dependencies = [

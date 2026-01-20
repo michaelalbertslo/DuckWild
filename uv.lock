@@ -80,7 +80,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "gpiod", specifier = ">=2.4.0" },
-    { name = "lorarf", url = "https://www.waveshare.net/w/upload/a/a1/Sx126x_lorawan_hat_code.zip", subdirectory = "python/lora" },
+    { name = "lorarf", directory = "vendor/sx126x_lorawan_hat_code/python/lora" },
     { name = "picamera2", specifier = ">=0.3.33" },
     { name = "rpi-lgpio", specifier = ">=0.6" },
 ]
@@ -155,12 +155,11 @@ wheels = [
 [[package]]
 name = "lorarf"
 version = "1.4.0"
-source = { url = "https://www.waveshare.net/w/upload/a/a1/Sx126x_lorawan_hat_code.zip", subdirectory = "python/lora" }
+source = { directory = "vendor/sx126x_lorawan_hat_code/python/lora" }
 dependencies = [
     { name = "rpi-gpio", marker = "sys_platform == 'never'" },
     { name = "spidev" },
 ]
-sdist = { hash = "sha256:8273f7605d73a7353311282faa69d2334b54af3736d09144bef06a6801aeee14" }
 
 [package.metadata]
 requires-dist = [
