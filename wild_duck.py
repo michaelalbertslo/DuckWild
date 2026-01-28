@@ -25,12 +25,12 @@ try:
 except ImportError:
     GPIO = None
 
-CAMERA_CLI = Path("/home/micha/DuckWild/camera_cli.py")
-PIPELINE_DIR = Path("/home/micha/DuckWild/species-pipeline")
-DETECT_CLI = PIPELINE_DIR / "detect.py"
+CAMERA_CLI = Path("/home/micha/DuckWild/DuckWild/camera_cli.py") 
+PIPELINE_DIR = Path("/home/micha/DuckWild/DuckWild/species-pipeline") 
+DETECT_CLI = Path("/home/micha/DuckWild/DuckWild/detect.py") 
 PREDICTIONS_JSON = PIPELINE_DIR / "speciesnet_results_fsm.json"
 
-IMAGE_DIR = Path("/home/micha/DuckWild/captured_images")
+IMAGE_DIR = Path("/home/micha/DuckWild/DuckWild/captured_images")
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 MOTION_PIN = 4  # BCM
@@ -40,6 +40,7 @@ DEFAULT_ADMIN1 = "CA"
 DEFAULT_MIN_CONF = 0.50
 
 TICK_HZ = 1.0  # run loop will call tick() ~1x/sec
+
 
 
 # ---------- small helpers ----------
@@ -62,13 +63,13 @@ def _run_speciesnet_cli(image_path: Path) -> Path:
         PREDICTIONS_JSON.unlink()
 
     cmd = [
-        "uv", "run", "python",
-        str(DETECT_CLI),
-        str(image_path),
-        "--country", DEFAULT_COUNTRY,
-        "--admin1_region", DEFAULT_ADMIN1,
-        "--min_conf", str(DEFAULT_MIN_CONF),
-        "--json", str(PREDICTIONS_JSON),
+    sys.executable,
+    str(DETECT_CLI),
+    str(image_path),
+    "--country", DEFAULT_COUNTRY,
+    "--admin1_region", DEFAULT_ADMIN1,
+    "--min_conf", str(DEFAULT_MIN_CONF),
+    "--json", str(PREDICTIONS_JSON),
     ]
     logging.info("Running SpeciesNet CLI: %s", " ".join(cmd))
     subprocess.run(cmd, check=True, cwd=str(PIPELINE_DIR))
