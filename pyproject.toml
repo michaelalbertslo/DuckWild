@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "LoRaRF",
     "gpiod>=2.4.0",
+    "picamera2>=0.3.33",
     "rpi-lgpio>=0.6",
 ]
 
@@ -15,5 +16,6 @@ LoRaRF = { url = "https://www.waveshare.net/w/upload/a/a1/Sx126x_lorawan_hat_cod
 
 [tool.uv]
 override-dependencies = [
-    "RPi.GPIO; sys_platform == 'never'",
+    # Not used anymore, we use rpi-lgpio
+    "RPi.GPIO; sys_platform == 'never'"
 ]
