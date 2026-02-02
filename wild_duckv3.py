@@ -55,9 +55,17 @@ MIN_CAPTURE_INTERVAL = 0.5
 
 RADIO_MAX_PAYLOAD = 229  # bytes, payload only
 
-def _build_wild_payload(species: str, conf: float, image_name: str, ts_iso: str, max_bytes: int = RADIO_MAX_PAYLOAD) -> tuple[bytes, dict]:
+
+def _build_wild_payload(
+    species: str,
+    conf: float,
+    image_name: str,
+    ts_iso: str,
+    max_bytes: int = RADIO_MAX_PAYLOAD,
+) -> tuple[bytes, dict]:
     """
     Return (payload_bytes, obj_used) guaranteed <= max_bytes.
+
     Strategy:
       1) Full keys
       2) Compact keys
@@ -68,7 +76,7 @@ def _build_wild_payload(species: str, conf: float, image_name: str, ts_iso: str,
 
     def enc(obj: dict) -> bytes:
         # compact separators; no ASCII-escaping to keep UTF-8 small
-        return json.dumps(obj, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
     rounded_conf = round(float(conf), 4)
 
@@ -102,7 +110,7 @@ def _build_wild_payload(species: str, conf: float, image_name: str, ts_iso: str,
             return b, {"s": s, "c": rounded_conf, "i": image_name, "t": ts_iso}
 
     # 4) Minimal: species hash (stable 12 hex chars)
-    sid = hashlib.sha1(species.encode('utf-8')).hexdigest()[:12]
+    sid = hashlib.sha1(species.encode("utf-8")).hexdigest()[:12]
     minimal = {"sid": sid, "c": rounded_conf, "i": image_name, "t": ts_iso}
     b = enc(minimal)
     # This should always fit, but assert safety
@@ -111,6 +119,7 @@ def _build_wild_payload(species: str, conf: float, image_name: str, ts_iso: str,
         minimal.pop("i", None)
         b = enc(minimal)
     return b, minimal
+
 
 # ---------- small helpers ----------
 def _timestamped_image_path() -> Path:
@@ -129,7 +138,8 @@ def _run_camera_cli_capture(output_path: Path) -> None:
     """Capture a photo immediately (GPIO handled by FSM)."""
     cmd = [sys.executable, str(CAMERA_CLI), "photo", "-o", str(output_path)]
     logging.info("Running camera CLI: %s", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    # Prevent indefinite hangs if camera stack wedges
+    subprocess.run(cmd, check=True, timeout=20)
 
 
 def _run_speciesnet_cli(image_path: Path) -> Path:
@@ -140,13 +150,18 @@ def _run_speciesnet_cli(image_path: Path) -> Path:
         sys.executable,
         str(DETECT_CLI),
         str(image_path),
-        "--country", DEFAULT_COUNTRY,
-        "--admin1_region", DEFAULT_ADMIN1,
-        "--min_conf", str(DEFAULT_MIN_CONF),
-        "--json", str(predictions_json),
+        "--country",
+        DEFAULT_COUNTRY,
+        "--admin1_region",
+        DEFAULT_ADMIN1,
+        "--min_conf",
+        str(DEFAULT_MIN_CONF),
+        "--json",
+        str(predictions_json),
     ]
     logging.info("Running SpeciesNet CLI: %s", " ".join(cmd))
-    subprocess.run(cmd, check=True, cwd=str(PIPELINE_DIR))
+    # Prevent indefinite hangs if model run wedges
+    subprocess.run(cmd, check=True, cwd=str(PIPELINE_DIR), timeout=15 * 60)
     return predictions_json
 
 
@@ -182,6 +197,11 @@ class WildDuck(Duck):
       - Capture worker pulls motion, takes photos, and enqueues image paths
       - Inference worker pulls image paths, runs SpeciesNet + radio send
       - tick() remains non-blocking for receive
+
+    Added robustness:
+      - Hardened RX handling so decode failures don't wedge the loop
+      - Watchdog restarts dead workers and drains queues if stuck
+      - Timeouts on camera/model subprocesses
     """
 
     def __init__(self, duid: int, target_duid: int = TARGET_DUID):
@@ -191,8 +211,19 @@ class WildDuck(Duck):
         self._alive = True
 
         # Queues
-        self._motion_q: "queue.Queue[float]" = queue.Queue()   # timestamps from PIR
-        self._image_q: "queue.Queue[Path]" = queue.Queue()     # captured image paths
+        self._motion_q: "queue.Queue[float]" = queue.Queue()  # timestamps from PIR
+        self._image_q: "queue.Queue[Path]" = queue.Queue()  # captured image paths
+
+        # --- Health / watchdog ---
+        self._bad_rx = 0
+        self._last_tick_ts = time.time()
+        self._last_motion_ts = 0.0
+        self._last_capture_done_ts = 0.0
+        self._last_infer_done_ts = 0.0
+
+        # Stuck detection thresholds (tune as needed)
+        self._capture_stuck_s = 30.0  # camera should never take > ~30s
+        self._infer_stuck_s = 10 * 60.0  # inference can be slow; give it time
 
         # Workers
         self._capture_thread = threading.Thread(
@@ -222,6 +253,7 @@ class WildDuck(Duck):
 
     def _on_motion(self, channel: int):
         t = time.time()
+        self._last_motion_ts = t
         logging.info("Motion detected on pin %d", channel)
         try:
             self._motion_q.put_nowait(t)
@@ -233,23 +265,89 @@ class WildDuck(Duck):
     def tick(self):
         """Non-blocking; called by Duck.run()."""
         self._tick_counter += 1
+        self._last_tick_ts = time.time()
+
+        # ---- RX poll (hardened) ----
         try:
             if hasattr(self, "try_receive_nowait"):
                 pkt = self.try_receive_nowait()  # type: ignore[attr-defined]
                 if pkt:
-                    self._handle_rx(pkt)
-        except Exception:
-            logging.exception("Receive poll failed")
+                    try:
+                        self._handle_rx(pkt)
+                    except Exception as e:
+                        self._bad_rx += 1
+                        logging.warning("RX handler error (bad_rx=%d): %r", self._bad_rx, e)
+        except Exception as e:
+            # If Duck internals occasionally bubble up decode failures, count and continue
+            self._bad_rx += 1
+            logging.warning("Receive poll failed (bad_rx=%d): %r", self._bad_rx, e)
+
+        # ---- Watchdog / recovery ----
+        self._watchdog()
 
         if self._tick_counter % int(max(1, TICK_HZ * 10)) == 0:
             logging.debug(
-                "tick: motion_q=%d image_q=%d",
-                self._motion_q.qsize(), self._image_q.qsize()
+                "tick: motion_q=%d image_q=%d bad_rx=%d cap_alive=%s inf_alive=%s",
+                self._motion_q.qsize(),
+                self._image_q.qsize(),
+                self._bad_rx,
+                self._capture_thread.is_alive(),
+                self._infer_thread.is_alive(),
             )
 
     def _handle_rx(self, pkt) -> None:
         logging.info("RX: %r", pkt)
         # Add any relay/forward rules here if needed
+
+    def _watchdog(self) -> None:
+        """Recover from stuck/dead worker threads so PIR can't 'hang' the system."""
+        now = time.time()
+
+        # 1) Restart worker threads if they died
+        if not self._capture_thread.is_alive():
+            logging.error("capture-worker died; restarting")
+            self._capture_thread = threading.Thread(
+                target=self._capture_worker_loop, name="capture-worker", daemon=True
+            )
+            self._capture_thread.start()
+
+        if not self._infer_thread.is_alive():
+            logging.error("infer-worker died; restarting")
+            self._infer_thread = threading.Thread(
+                target=self._inference_worker_loop, name="infer-worker", daemon=True
+            )
+            self._infer_thread.start()
+
+        # 2) Detect "motion happening but capture not completing"
+        if self._last_motion_ts and (now - self._last_motion_ts) < 10.0:
+            if self._last_capture_done_ts and (now - self._last_capture_done_ts) > self._capture_stuck_s:
+                logging.error(
+                    "Capture appears stuck: last_capture_done=%.1fs ago (motion seen %.1fs ago)",
+                    now - self._last_capture_done_ts,
+                    now - self._last_motion_ts,
+                )
+                # Best-effort: clear backlog so we can recover
+                self._drain_queue(self._motion_q, "motion_q")
+
+        # 3) If inference is jammed for a long time, drop old images so capture can continue
+        if self._last_infer_done_ts and (now - self._last_infer_done_ts) > self._infer_stuck_s:
+            logging.error(
+                "Inference appears stuck for %.1fs; draining image queue",
+                now - self._last_infer_done_ts,
+            )
+            self._drain_queue(self._image_q, "image_q")
+
+    @staticmethod
+    def _drain_queue(q: "queue.Queue", name: str, max_items: int = 1000) -> None:
+        n = 0
+        try:
+            while n < max_items:
+                q.get_nowait()
+                n += 1
+        except queue.Empty:
+            pass
+        if n:
+            logging.warning("Drained %d items from %s", n, name)
 
     # ---- Worker: capture (producer) ----
     def _capture_worker_loop(self):
@@ -272,6 +370,9 @@ class WildDuck(Duck):
                 _run_camera_cli_capture(image_path)
                 self._image_q.put(image_path)  # unbounded; don't lose frames
                 self._last_capture_ts = now
+                self._last_capture_done_ts = time.time()
+            except subprocess.TimeoutExpired:
+                logging.error("Camera capture timed out")
             except subprocess.CalledProcessError as e:
                 logging.error("Camera capture failed: %s", e)
             except Exception:
@@ -302,8 +403,7 @@ class WildDuck(Duck):
                 )
 
                 # Visibility: print the exact JSON we’re sending and its size
-                # (payload_obj is the semantic view; payload_bytes is the actual wire data)
-                wire_json_str = json.dumps(payload_obj, separators=(',', ':'), ensure_ascii=False)
+                wire_json_str = json.dumps(payload_obj, separators=(",", ":"), ensure_ascii=False)
                 logging.info("TX JSON (len=%d): %s", len(payload_bytes), wire_json_str)
                 logging.info("TX bytes=%d raw=%r", len(payload_bytes), payload_bytes)
                 logging.info("TX hex=%s", payload_bytes.hex())
@@ -315,7 +415,10 @@ class WildDuck(Duck):
                     UnknownData(payload_bytes),
                 )
                 logging.info("Sent WILD payload to dduid=%s", self._target_duid)
+                self._last_infer_done_ts = time.time()
 
+            except subprocess.TimeoutExpired:
+                logging.error("SpeciesNet timed out for %s", image_path)
             except subprocess.CalledProcessError as e:
                 logging.error("SpeciesNet subprocess error: %s", e)
             except Exception:
@@ -343,10 +446,10 @@ class WildDuck(Duck):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     # pick a stable DUID for this device
-    my_duid = 1337  
+    my_duid = 1337
     duck = WildDuck(duid=my_duid, target_duid=TARGET_DUID)
     try:
-        duck.run()  
+        duck.run()
     except KeyboardInterrupt:
         logging.info("Shutting down")
     finally:
