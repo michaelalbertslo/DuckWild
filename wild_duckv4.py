@@ -62,12 +62,15 @@ if GPIO is not None:
 
     GPIO.add_event_detect = _gpio_add_event_detect_safe  # type: ignore[assignment]
 
+HERE = Path(__file__).resolve().parent
 
-CAMERA_CLI = Path("/home/micha/DuckWild/DuckWild/camera_cli.py")
-PIPELINE_DIR = Path("/home/micha/DuckWild/DuckWild/species-pipeline")
-DETECT_CLI = Path("/home/micha/DuckWild/DuckWild/detect.py")
+PROJECT_ROOT = HERE  # or HERE.parent if you want one level up
 
-IMAGE_DIR = Path("/home/micha/DuckWild/DuckWild/captured_images")
+CAMERA_CLI   = PROJECT_ROOT / "camera_cli.py"
+PIPELINE_DIR = PROJECT_ROOT / "species-pipeline"
+DETECT_CLI   = PROJECT_ROOT / "detect.py"
+
+IMAGE_DIR = PROJECT_ROOT / "captured_images"
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 MOTION_PIN = 4  # BCM
