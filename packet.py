@@ -149,7 +149,7 @@ class CdpPacket:
         self,
         sduid: int,
         dduid: int,
-        muid: int,
+        muid: bytes,
         topic: Topic,
         duck_type: DuckType,
         hop_count: int,
@@ -198,7 +198,7 @@ class CdpPacket:
         )
         return (
             struct.pack(
-                "!QQLBBBL",
+                "!QQ4sBBBL",
                 self.sduid,
                 self.dduid,
                 self.muid,

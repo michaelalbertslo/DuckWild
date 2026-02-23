@@ -6,7 +6,7 @@ from receive_example import ReceiveDuck
 
 
 class SendDuck(Duck):
-    DUID = 1337
+    DUID = 6000288133652235083
 
     def __init__(self):
         super().__init__(DuckType.UNKNOWN, self.DUID, 1)

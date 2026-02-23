@@ -68,7 +68,7 @@ class Duck:
 
         # Set syncronize word for private network (0x1424)
         print("Set syncronize word to 0x1424")
-        self.lora.setSyncWord(0x3444)
+        self.lora.setSyncWord(0x1424)
 
     def on_received(self, packet: CdpPacket):
         print(
@@ -82,7 +82,11 @@ class Duck:
 
     def send(self, dduid: int, topic: Topic, data: Data):
         # Transmit message and counter
-        while (muid := random.getrandbits(32)) in self.muids_seen:
+        while (
+            muid := bytes(
+                random.choice(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") for i in range(4)
+            )
+        ) in self.muids_seen:
             pass
         # write() method must be placed between beginPacket() and endPacket()
         self.lora.beginPacket()
@@ -95,6 +99,7 @@ class Duck:
         self.lora.endPacket()
         # Wait until modulation process for transmitting packet finish
         self.lora.wait()
+        self.lora.purge(len(raw_packet))
 
     def tick(self):
         pass
@@ -104,7 +109,6 @@ class Duck:
         while True:
             entered = time.time()
             end = entered + tick_duration
-            self.tick()
             self.lora.request(self.lora.RX_CONTINUOUS)
             while time.time() < end:
                 if self.lora.available() > 0:
@@ -112,10 +116,20 @@ class Duck:
                     while self.lora.available() > 0:
                         message.append(self.lora.read())
                     print(message)
+                    print(
+                        "Packet status: RSSI = {0:0.2f} dBm | SNR = {1:0.2f} dB".format(
+                            self.lora.packetRssi(), self.lora.snr()
+                        )
+                    )
+                    status = self.lora.status()
+                    if status == self.lora.STATUS_CRC_ERR:
+                        print("CRC error")
+                    if status == self.lora.STATUS_HEADER_ERR:
+                        print("Packet header error")
                     try:
                         cdp_packet = CdpPacket.decode(bytes(message))
                         self.on_received(cdp_packet)
                     except:
                         print("Failed to decode message!")
                 time.sleep(RECEIVE_DELAY)
-            self.lora.standby()
+            self.tick()
