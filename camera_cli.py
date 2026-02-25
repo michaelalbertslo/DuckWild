@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from picamera2 import Picamera2
 else:
-    from sys_modules.picamera2 import Picamera2
+    from sys_modules import picamera2  # isort:skip
+    from picamera2 import Picamera2  # isort:skip
+
 
 try:
     import RPi.GPIO as GPIO
