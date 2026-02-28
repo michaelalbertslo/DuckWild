@@ -6,13 +6,20 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "LoRaRF",
-    "gpiod>=2.4.0",
     "numpy==2.4.2", # Other NumPy versions may work, but this one was used during testing on a Raspberry Pi Zero 2W
     "picamera2>=0.3.33",
-    "rpi-lgpio>=0.6",
     "setuptools<82.0.0",
     "speciesnet>=5.0.3",
     "torch==2.8",
+]
+
+[dependency-groups]
+pi = [
+    "rpi-lgpio>=0.6",
+    "gpiod>=2.4.0",
+]
+dev = [
+    "types-RPi.GPIO",
 ]
 
 [tool.uv.sources]
@@ -24,3 +31,10 @@ override-dependencies = [
     "RPi.GPIO; sys_platform == 'never'",
     "numpy"
 ]
+conflicts = [
+    [
+      { group = "pi" },
+      { group = "dev" },
+    ],
+]
+default-groups = "all" # Force the user to choose
