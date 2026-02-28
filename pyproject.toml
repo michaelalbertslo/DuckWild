@@ -3,12 +3,15 @@ name = "duckwild"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "LoRaRF",
     "gpiod>=2.4.0",
     "picamera2>=0.3.33",
     "rpi-lgpio>=0.6",
+    "setuptools<82.0.0",
+    "speciesnet>=5.0.3",
+    "torch==2.8",
 ]
 
 [tool.uv.sources]
@@ -17,5 +20,6 @@ LoRaRF = { path = "./vendor/sx126x_lorawan_hat_code/python/lora" }
 [tool.uv]
 override-dependencies = [
     # Not used anymore, we use rpi-lgpio
-    "RPi.GPIO; sys_platform == 'never'"
+    "RPi.GPIO; sys_platform == 'never'",
+    "numpy"
 ]

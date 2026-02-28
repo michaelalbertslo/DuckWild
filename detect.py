@@ -17,7 +17,7 @@ uv pip install speciesnet - will need uv and pip and python and such installed
 Run once on some test files before edge node deployment to install weights, etc.
 """
 
-import argparse, csv, json, os, shlex, subprocess, tempfile
+import argparse, csv, json, os, shlex, subprocess, tempfile, sys
 from pathlib import Path
 
 #defaults for CLI run
