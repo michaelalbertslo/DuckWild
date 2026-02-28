@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "LoRaRF",
     "gpiod>=2.4.0",
+    "numpy==2.4.2", # Other NumPy versions may work, but this one was used during testing on a Raspberry Pi Zero 2W
     "picamera2>=0.3.33",
     "rpi-lgpio>=0.6",
     "setuptools<82.0.0",
