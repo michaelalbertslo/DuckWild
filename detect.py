@@ -19,7 +19,7 @@ Run once on some test files before edge node deployment to install weights, etc.
 
 import argparse, csv, json, os, shlex, subprocess, tempfile
 from pathlib import Path
-
+import sys
 #defaults for CLI run
 
 DEFAULT_COUNTRY = "USA"
