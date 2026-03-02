@@ -80,7 +80,7 @@ IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 MOTION_PIN = 4  # BCM
 DEFAULT_COUNTRY = "USA"
 DEFAULT_ADMIN1 = "CA"
-DEFAULT_MIN_CONF = 0.50
+DEFAULT_MIN_CONF = 0.30
 
 TICK_HZ = 1.0
 MIN_CAPTURE_INTERVAL = 0.5
@@ -89,7 +89,7 @@ RADIO_MAX_PAYLOAD = 229  # payload only (your app-level limit)
 
 # subprocess timeouts (seconds)
 CAMERA_TIMEOUT_S = 20
-INFER_TIMEOUT_S = 15 * 60
+INFER_TIMEOUT_S = 3 * 60
 
 
 def _default_speciesnet_model_name() -> str:
