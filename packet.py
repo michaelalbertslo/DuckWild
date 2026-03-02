@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import struct
 from abc import ABC, abstractmethod
-from enum import Enum
+from dataclasses import dataclass
+from enum import Enum, IntEnum
 from zlib import crc32
 
 
@@ -19,35 +20,30 @@ class Data(ABC):
 
 
 # https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L37
+@dataclass
 class AckData(Data):
     pairs: list[tuple[int, int]]
-
-    def __init__(self, pairs: list[tuple[int, int]]):
-        self.pairs = pairs
 
     @classmethod
     def decode(cls, raw: bytes) -> AckData:
         n = struct.unpack_from("B", raw, 0)[0]
         pairs = []
-        pair_iterator = struct.iter_unpack("!QI", raw[1:])
+        pair_iterator = struct.iter_unpack("8s4s", raw[1:])
         for i in range(n):
             pairs.append(next(pair_iterator))
         return cls(pairs)
 
     def encode(self) -> bytes:
         return struct.pack("!B", len(self.pairs)) + b"".join(
-            struct.pack("!QI", duid, muid) for (duid, muid) in self.pairs
+            struct.pack("!8s4s", duid, muid) for (duid, muid) in self.pairs
         )
 
 
 # https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L61
+@dataclass
 class CommandData(Data):
     n: int
     data: bytes
-
-    def __init__(self, n: int, data: bytes):
-        self.n = n
-        self.data = data
 
     @classmethod
     def decode(cls, raw: bytes) -> CommandData:
@@ -58,9 +54,9 @@ class CommandData(Data):
         return struct.pack("!B", self.n) + self.data
 
 
+@dataclass
 class UnknownData(Data):
-    def __init__(self, data: bytes):
-        self.data = data
+    data: bytes
 
     @classmethod
     def decode(cls, raw: bytes) -> UnknownData:
@@ -69,18 +65,15 @@ class UnknownData(Data):
     def encode(self) -> bytes:
         return self.data
 
-    def __str__(self):
-        return str(self.data)
-
 
 # https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L56
-class CommandTypes(Enum):
+class CommandTypes(IntEnum):
     HEALTH = 0
     WIFI = 1
     CHANNEL = 2
 
 
-class Topic(Enum):
+class Topic(IntEnum):
     # Reserved topics
     # https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L116
     UNUSED = 0x00
@@ -123,10 +116,20 @@ class Topic(Enum):
     # Our custom topic
     WILD = 126
 
+    @classmethod
+    def _missing_(cls, value):
+        if not isinstance(value, int):
+            return None
+        # https://stackoverflow.com/a/77092528
+        unknown_enum_val = int.__new__(cls, value)
+        unknown_enum_val._name_ = "OTHER"
+        unknown_enum_val._value_ = value
+        return unknown_enum_val
+
 
 # https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/include/DuckTypes.h#L8
-class DuckType(Enum):
-    # A Duck of unknown type
+class DuckType(IntEnum):
+    # A Duck of unknown type ()
     UNKNOWN = 0x00
     # A PapaDuck
     PAPA = 0x01
@@ -137,40 +140,40 @@ class DuckType(Enum):
     # A Detector Duck
     DETECTOR = 0x04
 
+    @classmethod
+    def _missing_(cls, value):
+        if not isinstance(value, int):
+            return None
+        # https://stackoverflow.com/a/77092528
+        unknown_enum_val = int.__new__(cls, value)
+        unknown_enum_val._name_ = "OTHER"
+        unknown_enum_val._value_ = value
+        return unknown_enum_val
+
 
 class Duids(Enum):
-    PAPA = 0x0000000000000000
-    BROADCAST = 0xFFFFFFFFFFFFFFFF
+    PAPA = b"\x00\x00\x00\x00\x00\x00\x00\x00"
+    BROADCAST = b"\xff\xff\xff\xff\xff\xff\xff\xff"
 
 
 # https://github.com/ClusterDuck-Protocol/ClusterDuck-Protocol/blob/4f0e00d1963783f93bae4ab3d6046a36be4a3e9c/src/CdpPacket.h#L126
+@dataclass
 class CdpPacket:
-    def __init__(
-        self,
-        sduid: int,
-        dduid: int,
-        muid: bytes,
-        topic: Topic,
-        duck_type: DuckType,
-        hop_count: int,
-        data: Data | None,
-    ):
-        self.sduid = sduid
-        self.dduid = dduid
-        self.muid = muid
-        self.topic = topic
-        self.duck_type = duck_type
-        self.hop_count = hop_count
-        self.data = data
+    sduid: bytes
+    dduid: bytes
+    muid: bytes
+    topic: Topic
+    duck_type: DuckType
+    hop_count: int
+    data: Data | None
 
     @classmethod
     def decode(cls, raw: bytes) -> CdpPacket:
-        (sduid, dduid, muid, t, dt, hop_count, data_crc) = struct.unpack_from(
-            "!QQLBBBL", raw, 0
+        (sduid, dduid, muid, topic, duck_type, hop_count, data_crc) = (
+            struct.unpack_from("!8s8s4sBBBL", raw, 0)
         )
-        topic = Topic(t)
-        # duck_type = DuckType(dt)
-        duck_type = dt
+        topic = Topic(topic)
+        duck_type = DuckType(duck_type)
         data_raw = raw[27:]
         if len(data_raw) == 0:
             data = None
@@ -187,23 +190,14 @@ class CdpPacket:
             data_raw = self.data.encode()
         else:
             data_raw = b""
-        print(
-            self.sduid,
-            self.dduid,
-            self.muid,
-            self.topic.value,
-            self.duck_type.value,
-            self.hop_count,
-            crc32(data_raw),
-        )
         return (
             struct.pack(
-                "!QQ4sBBBL",
+                "!8s8s4sBBBL",
                 self.sduid,
                 self.dduid,
                 self.muid,
-                self.topic.value,
-                self.duck_type.value,
+                self.topic,
+                self.duck_type,
                 self.hop_count,
                 crc32(data_raw),
             )

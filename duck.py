@@ -14,7 +14,7 @@ RECEIVE_DELAY = 0.01
 
 
 class Duck:
-    def __init__(self, duck_type: DuckType, duid: int, tps: float):
+    def __init__(self, duck_type: DuckType, duid: bytes, tps: float):
         self.type = duck_type
         self.duid = duid
         self.muids_seen = deque(maxlen=100)
@@ -72,14 +72,7 @@ class Duck:
         self.lora.setSyncWord(0x1424)
 
     def on_received_any(self, packet: CdpPacket):
-        print(
-            "Received message",
-            packet.muid,
-            "from",
-            packet.sduid,
-            ":",
-            packet.data,
-        )
+        print("Received message", packet)
 
     def on_received(self, packet: CdpPacket):
         pass
@@ -101,7 +94,7 @@ class Duck:
         self.lora.wait()
         self.lora.purge(len(raw_packet))
 
-    def send(self, dduid: int, topic: Topic, data: Data):
+    def send(self, dduid: bytes, topic: Topic, data: Data):
         # Transmit message and counter
         while (
             muid := bytes(
