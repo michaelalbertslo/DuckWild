@@ -6,7 +6,7 @@ from copy import deepcopy
 
 from LoRaRF import SX126x
 
-from packet import CdpPacket, Data, DuckType, Topic
+from packet import CdpPacket, Data, DuckType, Duids, Topic
 
 DEQUE_LEN = 100
 INITIAL_HOP_COUNT = 5
@@ -145,7 +145,14 @@ class Duck:
                         print("Failed to decode message!")
                         continue
                     self.on_received_any(cdp_packet)
-                    if cdp_packet.dduid == self.duid:
+                    if (
+                        cdp_packet.dduid == self.duid
+                        or cdp_packet.dduid == Duids.BROADCAST
+                        or (
+                            self.type == DuckType.PAPA
+                            and cdp_packet.dduid == Duids.PAPA
+                        )
+                    ):
                         self.on_received(cdp_packet)
                     else:
                         self.on_received_unintended(cdp_packet)
