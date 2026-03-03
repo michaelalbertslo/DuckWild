@@ -9,7 +9,6 @@ from LoRaRF import SX126x
 from packet import CdpPacket, Data, DuckType, Duids, Topic
 
 DEQUE_LEN = 100
-INITIAL_HOP_COUNT = 5
 RECEIVE_DELAY = 0.01
 
 
@@ -102,9 +101,7 @@ class Duck:
             )
         ) in self.muids_seen:
             pass
-        packet = CdpPacket(
-            self.duid, dduid, muid, topic, self.type, INITIAL_HOP_COUNT, data
-        )
+        packet = CdpPacket(self.duid, dduid, muid, topic, self.type, 0, data)
         self._send_packet(packet)
 
     def tick(self):
