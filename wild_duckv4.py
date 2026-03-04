@@ -37,7 +37,7 @@ from typing import Optional, Tuple
 from duck import Duck
 from packet import DuckType, Topic, UnknownData
 
-TARGET_DUID = 8331  # destination node
+PAPA = 0x01  # destination node
 
 # ---- PIR / camera / detection config ----
 try:
@@ -292,8 +292,8 @@ class WildDuck(Duck):
 
     def __init__(
         self,
-        duid: int,
-        target_duid: int = TARGET_DUID,
+        duid: bytes,
+        target_duid: bytes = PAPA,
         *,
         mode: str = "test",
         speciesnet_model: Optional[str] = None,
@@ -777,8 +777,8 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=None,
         help="SpeciesNet model identifier or local model folder. Defaults to $SPECIESNET_MODEL or speciesnet.DEFAULT_MODEL.",
     )
-    p.add_argument("--duid", type=int, default=1337, help="Local Duck DUID")
-    p.add_argument("--target-duid", type=int, default=TARGET_DUID, help="Destination Duck DUID")
+    p.add_argument("--duid", type=bytes, default=1337, help="Local Duck DUID")
+    p.add_argument("--target-duid", type=bytes, default=PAPA, help="Destination Duck DUID")
     return p.parse_args(argv)
 
 
@@ -790,8 +790,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(message)s")
 
     duck = WildDuck(
-        duid=int(args.duid),
-        target_duid=int(args.target_duid),
+        duid=args.duid.encode(),
+        target_duid=args.target_duid.encode(),
         mode=str(args.mode),
         speciesnet_model=args.speciesnet_model,
     )
