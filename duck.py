@@ -2,18 +2,18 @@
 import random
 import time
 from collections import deque
+from copy import deepcopy
 
 from LoRaRF import SX126x
 
-from packet import CdpPacket, Data, DuckType, Topic
+from packet import CdpPacket, Data, DuckType, Duids, Topic
 
 DEQUE_LEN = 100
-INITIAL_HOP_COUNT = 5
 RECEIVE_DELAY = 0.01
 
 
 class Duck:
-    def __init__(self, duck_type: DuckType, duid: int, tps: float):
+    def __init__(self, duck_type: DuckType, duid: bytes, tps: float):
         self.type = duck_type
         self.duid = duid
         self.muids_seen = deque(maxlen=100)
@@ -68,33 +68,41 @@ class Duck:
 
         # Set syncronize word for private network (0x1424)
         print("Set syncronize word to 0x1424")
-        self.lora.setSyncWord(0x3444)
+        self.lora.setSyncWord(0x1424)
+
+    def on_received_any(self, packet: CdpPacket):
+        print("Received message", packet)
 
     def on_received(self, packet: CdpPacket):
-        print(
-            "Received message",
-            packet.muid,
-            "from",
-            packet.sduid,
-            ":",
-            packet.data,
-        )
+        pass
 
-    def send(self, dduid: int, topic: Topic, data: Data):
-        # Transmit message and counter
-        while (muid := random.getrandbits(32)) in self.muids_seen:
-            pass
-        # write() method must be placed between beginPacket() and endPacket()
+    def on_received_unintended(self, packet: CdpPacket):
+        if packet.hop_count < 10:
+            new_packet = deepcopy(packet)
+            new_packet.hop_count += 1
+            self._send_packet(new_packet)
+
+    def _send_packet(self, packet: CdpPacket):
         self.lora.beginPacket()
-        packet = CdpPacket(
-            self.duid, dduid, muid, topic, self.type, INITIAL_HOP_COUNT, data
-        )
         raw_packet = packet.encode()
         print(raw_packet)
+
         self.lora.write(list(raw_packet), len(raw_packet))
         self.lora.endPacket()
         # Wait until modulation process for transmitting packet finish
         self.lora.wait()
+        self.lora.purge(len(raw_packet))
+
+    def send(self, dduid: bytes, topic: Topic, data: Data):
+        # Transmit message and counter
+        while (
+            muid := bytes(
+                random.choice(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") for i in range(4)
+            )
+        ) in self.muids_seen:
+            pass
+        packet = CdpPacket(self.duid, dduid, muid, topic, self.type, 0, data)
+        self._send_packet(packet)
 
     def tick(self):
         pass
@@ -104,7 +112,6 @@ class Duck:
         while True:
             entered = time.time()
             end = entered + tick_duration
-            self.tick()
             self.lora.request(self.lora.RX_CONTINUOUS)
             while time.time() < end:
                 if self.lora.available() > 0:
@@ -112,10 +119,32 @@ class Duck:
                     while self.lora.available() > 0:
                         message.append(self.lora.read())
                     print(message)
+                    print(
+                        "Packet status: RSSI = {0:0.2f} dBm | SNR = {1:0.2f} dB".format(
+                            self.lora.packetRssi(), self.lora.snr()
+                        )
+                    )
+                    status = self.lora.status()
+                    if status == self.lora.STATUS_CRC_ERR:
+                        print("CRC error")
+                    if status == self.lora.STATUS_HEADER_ERR:
+                        print("Packet header error")
                     try:
                         cdp_packet = CdpPacket.decode(bytes(message))
-                        self.on_received(cdp_packet)
                     except:
                         print("Failed to decode message!")
+                        continue
+                    self.on_received_any(cdp_packet)
+                    if (
+                        cdp_packet.dduid == self.duid
+                        or cdp_packet.dduid == Duids.BROADCAST
+                        or (
+                            self.type == DuckType.PAPA
+                            and cdp_packet.dduid == Duids.PAPA
+                        )
+                    ):
+                        self.on_received(cdp_packet)
+                    else:
+                        self.on_received_unintended(cdp_packet)
                 time.sleep(RECEIVE_DELAY)
-            self.lora.standby()
+            self.tick()
