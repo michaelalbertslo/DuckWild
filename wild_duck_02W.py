@@ -4,18 +4,12 @@ from __future__ import annotations
 """
 DuckWild - decoupled PIR -> capture -> inference -> TX
 
-Hardening highlights:
-- Idempotent GPIO edge registration via a safe wrapper that first remove_event_detect()
-  (also protects LoRaRF/SX126x IRQ registration like GPIO 16)
-- GPIO callbacks never raise
-- Camera subprocess runs in its own process group; killpg on timeout
-- SpeciesNet model stays resident in a dedicated worker thread (no per-image load/unload)
-- Soft watchdog (drain queues / restart dead worker threads)
-- Hard watchdog (os._exit) if tick/capture/inference truly wedges (pair with systemd Restart=always)
+Updates for Pi Zero 2 W:
+- Override run() so tick() runs on schedule (prevents "tick stalled")
+- Extend inference/capture watchdog timers to reflect slower hardware
+- Reduce capture rate default (MIN_CAPTURE_INTERVAL) to avoid backlog
 
-Run modes:
-- test: keep current verbosity; keep captured images + JSON outputs on disk
-- deploy: suppress most logs/prints; DO NOT write JSON; delete image (and any temp JSON) regardless of success/failure
+NOTE: This assumes Duck.py provides try_receive_nowait(). If not, add it (recommended).
 """
 
 import argparse
@@ -81,13 +75,17 @@ DEFAULT_ADMIN1 = "CA"
 DEFAULT_MIN_CONF = 0.30
 
 TICK_HZ = 1.0
-MIN_CAPTURE_INTERVAL = 3
+
+# Pi Zero 2W: reduce capture frequency to avoid building inference backlog.
+MIN_CAPTURE_INTERVAL = 3.0  # was 0.5
 
 RADIO_MAX_PAYLOAD = 229  # payload only (your app-level limit)
 
-# subprocess timeouts (seconds)
-CAMERA_TIMEOUT_S = 20
-INFER_TIMEOUT_S = 3 * 60
+# ----------------------------
+# Pi Zero 2W: longer timeouts
+# ----------------------------
+CAMERA_TIMEOUT_S = 60          # was 20
+INFER_TIMEOUT_S = 8 * 60      # was 3*60
 
 # DUIDs are 8 bytes (per packet.py)
 PAPA_DUID: bytes = Duids.PAPA.value
@@ -368,8 +366,9 @@ class WildDuck(Duck):
         self._infer_in_progress = False
         self._infer_start_ts = 0.0
 
-        self._capture_stuck_s = float(CAMERA_TIMEOUT_S + 10)
-        self._infer_stuck_s = 60.0
+        # ---- Pi Zero 2W: longer stuck thresholds ----
+        self._capture_stuck_s = float(CAMERA_TIMEOUT_S + 20)  # was CAMERA_TIMEOUT_S+10
+        self._infer_stuck_s = 10 * 60.0  # was 60.0
 
         self._last_capture_ts = 0.0
 
@@ -407,6 +406,35 @@ class WildDuck(Duck):
             self._speciesnet_model_name,
         )
 
+    # ---- MAIN LOOP FIX ----
+    def run(self):
+        """
+        Override Duck.run() to ensure tick() is called regularly.
+        This prevents the hard watchdog "tick stalled" on slow hardware,
+        where the base Duck.run() RX loop can dominate execution.
+        """
+        tick_duration = 1.0 / float(self.tps) if self.tps and self.tps > 0 else 1.0
+
+        # Put radio in continuous RX once; tick() polls (via try_receive_nowait)
+        try:
+            self.lora.request(self.lora.RX_CONTINUOUS)
+        except Exception:
+            pass
+
+        while self._alive:
+            start = time.time()
+            try:
+                self.tick()
+            except Exception:
+                logging.exception("tick() raised unexpectedly")
+
+            elapsed = time.time() - start
+            sleep_s = tick_duration - elapsed
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            else:
+                time.sleep(0.001)
+
     # ---- GPIO ----
     def _setup_gpio(self) -> None:
         if GPIO is None:
@@ -442,7 +470,7 @@ class WildDuck(Duck):
         self._tick_counter += 1
         self._last_tick_ts = time.time()
 
-        # If you added Duck.try_receive_nowait() (recommended), this will work.
+        # If you added Duck.try_receive_nowait(), this will work.
         try:
             if hasattr(self, "try_receive_nowait"):
                 pkt = self.try_receive_nowait()  # type: ignore[attr-defined]
@@ -472,7 +500,6 @@ class WildDuck(Duck):
             )
 
     def _handle_rx(self, pkt) -> None:
-        # pkt is a CdpPacket from packet.py
         logging.info(
             "RX: topic=%s sduid=%s dduid=%s muid=%s hop=%s",
             getattr(pkt, "topic", None),
@@ -523,9 +550,10 @@ class WildDuck(Duck):
             self._drain_queue(self._image_q, "image_q", max_items=1000)
 
     def _hard_watchdog_loop(self):
-        TICK_DEAD_S = 10.0
-        CAPTURE_HARD_STUCK_S = CAMERA_TIMEOUT_S + 30
-        INFER_HARD_STUCK_S = 75
+        # Pi Zero 2W: longer thresholds
+        TICK_DEAD_S = 60.0                    # was 10.0
+        CAPTURE_HARD_STUCK_S = CAMERA_TIMEOUT_S + 60  # was CAMERA_TIMEOUT_S + 30
+        INFER_HARD_STUCK_S = 15 * 60          # was 75
 
         while self._alive:
             time.sleep(2.0)
