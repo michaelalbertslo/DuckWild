@@ -4,12 +4,20 @@ from __future__ import annotations
 """
 DuckWild - decoupled PIR -> capture -> inference -> TX
 
-Updates for Pi Zero 2 W:
+Pi Zero 2 W improvements:
 - Override run() so tick() runs on schedule (prevents "tick stalled")
-- Extend inference/capture watchdog timers to reflect slower hardware
-- Reduce capture rate default (MIN_CAPTURE_INTERVAL) to avoid backlog
+- Extend watchdog timers for slower hardware
+- Use a *persistent camera worker process* (Option B) that uses Picamera2
+  (consistent with your prior camera_cli approach and avoids libcamera-still dependency)
 
-NOTE: This assumes Duck.py provides try_receive_nowait(). If not, add it (recommended).
+Camera worker protocol (stdin/stdout, line-based):
+  - "CAPTURE <path>" -> "OK" or "ERR <message>"
+  - "PING" -> "PONG"
+  - "EXIT" -> "BYE"
+
+Requirements:
+- python3-picamera2 installed
+- camera enabled / configured on Raspberry Pi OS
 """
 
 import argparse
@@ -38,10 +46,6 @@ except ImportError:
     GPIO = None
 
 # ---- IMPORTANT GPIO HARDENING ----
-# This makes GPIO.add_event_detect "idempotent" for ANY pin.
-# It prevents crashes like:
-#   lgpio.error: 'bad event request'
-# when a library (LoRaRF/SX126x) tries to add_event_detect() twice for the same pin (e.g., IRQ GPIO 16).
 if GPIO is not None:
     _GPIO_ORIG_ADD = GPIO.add_event_detect
 
@@ -60,9 +64,8 @@ if GPIO is not None:
     GPIO.add_event_detect = _gpio_add_event_detect_safe  # type: ignore[assignment]
 
 HERE = Path(__file__).resolve().parent
-PROJECT_ROOT = HERE  # or HERE.parent if you want one level up
+PROJECT_ROOT = HERE
 
-CAMERA_CLI = PROJECT_ROOT / "camera_cli.py"
 PIPELINE_DIR = PROJECT_ROOT / "species-pipeline"
 DETECT_CLI = PROJECT_ROOT / "detect.py"
 
@@ -75,19 +78,18 @@ DEFAULT_ADMIN1 = "CA"
 DEFAULT_MIN_CONF = 0.30
 
 TICK_HZ = 1.0
+MIN_CAPTURE_INTERVAL = 3.0  # Pi Zero 2W: avoid backlog
 
-# Pi Zero 2W: reduce capture frequency to avoid building inference backlog.
-MIN_CAPTURE_INTERVAL = 3.0  # was 0.5
+RADIO_MAX_PAYLOAD = 229
 
-RADIO_MAX_PAYLOAD = 229  # payload only (your app-level limit)
-
-# ----------------------------
 # Pi Zero 2W: longer timeouts
-# ----------------------------
-CAMERA_TIMEOUT_S = 60          # was 20
-INFER_TIMEOUT_S = 8 * 60      # was 3*60
+CAMERA_TIMEOUT_S = 35
+INFER_TIMEOUT_S = 12 * 60
 
-# DUIDs are 8 bytes (per packet.py)
+# Camera worker startup + per-capture safety timeouts
+CAMERA_WORKER_STARTUP_S = 20.0
+CAMERA_CAPTURE_CMD_TIMEOUT_S = 20.0
+
 PAPA_DUID: bytes = Duids.PAPA.value
 
 
@@ -102,18 +104,10 @@ def duid_from_hex(s: str) -> bytes:
     s = (s or "").strip().lower()
     if s.startswith("0x"):
         s = s[2:]
-    # 8 bytes -> 16 hex chars
     return bytes.fromhex(s.zfill(16))
 
 
 def normalize_duid(v) -> bytes:
-    """
-    Accept:
-      - bytes length 8
-      - int
-      - hex string like "0x0000000000000539" or "539"
-    Return 8-byte bytes.
-    """
     if isinstance(v, bytes):
         if len(v) != 8:
             raise ValueError(f"DUID must be 8 bytes, got {len(v)}")
@@ -128,23 +122,225 @@ def normalize_duid(v) -> bytes:
     raise TypeError(f"Unsupported DUID type: {type(v)}")
 
 
-def _default_speciesnet_model_name() -> str:
+# ----------------------------
+# Persistent Camera Worker (Picamera2)
+# ----------------------------
+class CameraServer:
     """
-    Resolve the model identifier/path for SpeciesNet.
+    Spawns a persistent camera worker (this same script with --camera-worker) and
+    sends CAPTURE commands over stdin; receives OK/ERR over stdout.
+    """
 
-    Priority:
-      1) $SPECIESNET_MODEL
-      2) If PIPELINE_DIR looks like a local model folder (contains info.json), use it
-      3) speciesnet.DEFAULT_MODEL if available
-      4) Hardcoded last-resort DEFAULT_MODEL string
+    def __init__(self, *, startup_timeout_s: float = CAMERA_WORKER_STARTUP_S):
+        self._proc: Optional[subprocess.Popen[str]] = None
+        self._lock = threading.Lock()
+        self._startup_timeout_s = startup_timeout_s
+
+    def start(self) -> None:
+        with self._lock:
+            if self._proc and self._proc.poll() is None:
+                return
+
+            cmd = [
+                sys.executable,
+                "-u",
+                str(Path(__file__).resolve()),
+                "--camera-worker",
+            ]
+            logging.info("Starting camera worker: %s", " ".join(cmd))
+            self._proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+            )
+
+            assert self._proc.stdout is not None
+            deadline = time.time() + self._startup_timeout_s
+            while time.time() < deadline:
+                line = self._proc.stdout.readline()
+                if not line:
+                    if self._proc.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                    continue
+                line = line.strip()
+                if line == "READY":
+                    logging.info("Camera worker READY")
+                    return
+                logging.info("Camera worker: %s", line)
+
+            err = ""
+            try:
+                assert self._proc.stderr is not None
+                err = self._proc.stderr.read()
+            except Exception:
+                pass
+            self.stop()
+            raise RuntimeError(f"Camera worker failed to start (no READY). stderr:\n{err}")
+
+    def stop(self) -> None:
+        with self._lock:
+            if not self._proc:
+                return
+            proc = self._proc
+            self._proc = None
+
+        try:
+            if proc.poll() is None:
+                try:
+                    self._send_line("EXIT")
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+        finally:
+            try:
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+    def _send_line(self, line: str) -> None:
+        if not self._proc or self._proc.poll() is not None:
+            raise RuntimeError("Camera worker is not running")
+        assert self._proc.stdin is not None
+        self._proc.stdin.write(line + "\n")
+        self._proc.stdin.flush()
+
+    def _read_line(self, timeout_s: float) -> str:
+        if not self._proc or self._proc.poll() is not None:
+            raise RuntimeError("Camera worker is not running")
+        assert self._proc.stdout is not None
+
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            line = self._proc.stdout.readline()
+            if line:
+                return line.strip()
+            if self._proc.poll() is not None:
+                break
+            time.sleep(0.02)
+        raise TimeoutError("Timed out waiting for camera worker response")
+
+    def capture(self, output_path: Path, *, timeout_s: float = CAMERA_CAPTURE_CMD_TIMEOUT_S) -> None:
+        self.start()
+        out = str(output_path)
+
+        with self._lock:
+            self._send_line(f"CAPTURE {out}")
+            resp = self._read_line(timeout_s=timeout_s)
+
+        if resp == "OK":
+            return
+        if resp.startswith("ERR"):
+            raise RuntimeError(resp)
+        raise RuntimeError(f"Unexpected camera worker response: {resp!r}")
+
+
+def camera_worker_main() -> int:
     """
+    Runs in the camera worker process.
+    Keeps Picamera2 initialized so per-motion capture is fast.
+    """
+    # Keep worker logs minimal; parent logs timing
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s [CAMERA] %(message)s")
+
+    try:
+        from picamera2 import Picamera2  # REQUIRED
+    except Exception as e:
+        sys.stdout.write("READY\n")
+        sys.stdout.flush()
+        sys.stdout.write(f"ERR Picamera2 import failed: {e}\n")
+        sys.stdout.flush()
+        return 2
+
+    picam2 = None
+    try:
+        picam2 = Picamera2()
+
+        # Fast, lower-res still config. Tune size as needed.
+        # Smaller is faster and helps not miss subjects.
+        still_config = picam2.create_still_configuration(
+            main={"size": (1024, 768)},
+            buffer_count=2,
+        )
+        picam2.configure(still_config)
+        picam2.start()
+
+        # Small settle time for exposure/awb
+        time.sleep(0.2)
+    except Exception as e:
+        # Signal ready so parent doesn't hang, then return error on first capture
+        sys.stdout.write("READY\n")
+        sys.stdout.flush()
+        sys.stdout.write(f"ERR Picamera2 init failed: {e}\n")
+        sys.stdout.flush()
+        return 3
+
+    sys.stdout.write("READY\n")
+    sys.stdout.flush()
+
+    def do_capture(path_str: str) -> None:
+        path = Path(path_str)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        assert picam2 is not None
+        picam2.capture_file(str(path))
+
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+
+        if line == "PING":
+            sys.stdout.write("PONG\n")
+            sys.stdout.flush()
+            continue
+
+        if line == "EXIT":
+            sys.stdout.write("BYE\n")
+            sys.stdout.flush()
+            break
+
+        if line.startswith("CAPTURE "):
+            try:
+                _, path_str = line.split(" ", 1)
+                do_capture(path_str)
+                sys.stdout.write("OK\n")
+                sys.stdout.flush()
+            except Exception as e:
+                msg = str(e).replace("\n", " ")[:400]
+                sys.stdout.write(f"ERR {msg}\n")
+                sys.stdout.flush()
+            continue
+
+        sys.stdout.write("ERR unknown_command\n")
+        sys.stdout.flush()
+
+    try:
+        if picam2 is not None:
+            picam2.stop()
+            picam2.close()
+    except Exception:
+        pass
+
+    return 0
+
+
+# ----------------------------
+# SpeciesNet + payload utilities
+# ----------------------------
+def _default_speciesnet_model_name() -> str:
     env = os.environ.get("SPECIESNET_MODEL")
     if env:
         return env
-
     if (PIPELINE_DIR / "info.json").exists():
         return str(PIPELINE_DIR)
-
     try:
         from speciesnet import DEFAULT_MODEL  # type: ignore
         return str(DEFAULT_MODEL)
@@ -159,15 +355,6 @@ def _build_wild_payload(
     ts_iso: str,
     max_bytes: int = RADIO_MAX_PAYLOAD,
 ) -> tuple[bytes, dict]:
-    """
-    Return (payload_bytes, obj_used) guaranteed <= max_bytes.
-
-    Strategy:
-      1) Full keys
-      2) Compact keys
-      3) Trim species
-      4) Minimal with species hash
-    """
     import hashlib
 
     def enc(obj: dict) -> bytes:
@@ -230,10 +417,6 @@ def _safe_unlink(path: Optional[Path]) -> None:
 
 
 def _run_with_timeout_killpg(cmd: list[str], *, cwd: str | None, timeout_s: float) -> None:
-    """
-    Run a command in its own process group and SIGKILL the whole group on timeout.
-    Prevents lingering children (common cause of long-term wedging).
-    """
     proc = subprocess.Popen(cmd, cwd=cwd, start_new_session=True)
     try:
         proc.wait(timeout=timeout_s)
@@ -252,21 +435,7 @@ def _run_with_timeout_killpg(cmd: list[str], *, cwd: str | None, timeout_s: floa
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
 
-def _run_camera_cli_capture(output_path: Path) -> None:
-    cmd = [sys.executable, str(CAMERA_CLI), "photo", "-o", str(output_path)]
-    logging.info("Running camera CLI: %s", " ".join(cmd))
-    _run_with_timeout_killpg(cmd, cwd=None, timeout_s=CAMERA_TIMEOUT_S)
-
-
 def _run_speciesnet_cli(image_path: Path, *, predictions_json: Path) -> None:
-    """
-    Fallback: runs detect.py as a subprocess (loads/unloads models per image).
-
-    NOTE:
-      - In deploy mode, we avoid JSON writing entirely by NOT using this fallback.
-        If you need deploy mode to survive a resident-model failure, you'd have to allow
-        temporary JSON or add a stdout parsing pathway in detect.py.
-    """
     cmd = [
         sys.executable,
         str(DETECT_CLI),
@@ -317,15 +486,6 @@ class _SpeciesNetResult:
 
 
 class WildDuck(Duck):
-    """
-    Decoupled design:
-      - PIR ISR enqueues motion timestamps
-      - Capture worker pulls motion, takes photos, and enqueues image paths
-      - Inference worker pulls image paths, runs SpeciesNet + radio send
-      - SpeciesNet worker holds model open and executes per-image inference
-      - tick() remains non-blocking for receive
-    """
-
     def __init__(
         self,
         duid: bytes,
@@ -352,27 +512,26 @@ class WildDuck(Duck):
         self._motion_q: "queue.Queue[float]" = queue.Queue()
         self._image_q: "queue.Queue[Path]" = queue.Queue()
 
-        # SpeciesNet worker request queue (inference thread -> model thread)
         self._speciesnet_q: "queue.Queue[_SpeciesNetTask]" = queue.Queue(maxsize=8)
 
         self._bad_rx = 0
         self._last_tick_ts = time.time()
-        self._last_motion_ts = 0.0
-        self._last_capture_done_ts = 0.0
-        self._last_infer_done_ts = 0.0
 
         self._capture_in_progress = False
         self._capture_start_ts = 0.0
         self._infer_in_progress = False
         self._infer_start_ts = 0.0
 
-        # ---- Pi Zero 2W: longer stuck thresholds ----
-        self._capture_stuck_s = float(CAMERA_TIMEOUT_S + 20)  # was CAMERA_TIMEOUT_S+10
-        self._infer_stuck_s = 10 * 60.0  # was 60.0
+        self._capture_stuck_s = float(CAMERA_TIMEOUT_S + 20)
+        self._infer_stuck_s = 10 * 60.0
 
         self._last_capture_ts = 0.0
 
-        # SpeciesNet model state (lives in _speciesnet_thread)
+        # Persistent camera worker (Picamera2)
+        self._camera = CameraServer(startup_timeout_s=CAMERA_WORKER_STARTUP_S)
+        self._camera.start()
+
+        # SpeciesNet model state
         self._speciesnet_model_name = speciesnet_model or _default_speciesnet_model_name()
         self._speciesnet_ready = threading.Event()
         self._speciesnet_init_error: Optional[BaseException] = None
@@ -392,7 +551,6 @@ class WildDuck(Duck):
 
         self._setup_gpio()
 
-        # Start threads
         self._speciesnet_thread.start()
         self._capture_thread.start()
         self._infer_thread.start()
@@ -406,16 +564,8 @@ class WildDuck(Duck):
             self._speciesnet_model_name,
         )
 
-    # ---- MAIN LOOP FIX ----
     def run(self):
-        """
-        Override Duck.run() to ensure tick() is called regularly.
-        This prevents the hard watchdog "tick stalled" on slow hardware,
-        where the base Duck.run() RX loop can dominate execution.
-        """
         tick_duration = 1.0 / float(self.tps) if self.tps and self.tps > 0 else 1.0
-
-        # Put radio in continuous RX once; tick() polls (via try_receive_nowait)
         try:
             self.lora.request(self.lora.RX_CONTINUOUS)
         except Exception:
@@ -435,69 +585,38 @@ class WildDuck(Duck):
             else:
                 time.sleep(0.001)
 
-    # ---- GPIO ----
     def _setup_gpio(self) -> None:
         if GPIO is None:
             raise RuntimeError("RPi.GPIO not available on this system.")
-
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(MOTION_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-
         try:
             GPIO.remove_event_detect(MOTION_PIN)
         except Exception:
             pass
-
-        try:
-            GPIO.add_event_detect(MOTION_PIN, GPIO.RISING, callback=self._on_motion, bouncetime=500)
-        except Exception:
-            logging.exception("Failed to add_event_detect for PIR pin %d", MOTION_PIN)
-            os._exit(120)
-
+        GPIO.add_event_detect(MOTION_PIN, GPIO.RISING, callback=self._on_motion, bouncetime=500)
         logging.info("Configured PIR on BCM pin %d", MOTION_PIN)
 
     def _on_motion(self, channel: int):
         try:
-            t = time.time()
-            self._last_motion_ts = t
-            logging.info("Motion detected on pin %d", channel)
-            self._motion_q.put_nowait(t)
+            self._motion_q.put_nowait(time.time())
         except Exception:
             logging.exception("Exception in GPIO motion callback")
 
-    # ---- Duck tick / receive ----
     def tick(self):
         self._tick_counter += 1
         self._last_tick_ts = time.time()
 
-        # If you added Duck.try_receive_nowait(), this will work.
         try:
             if hasattr(self, "try_receive_nowait"):
                 pkt = self.try_receive_nowait()  # type: ignore[attr-defined]
                 if pkt:
-                    try:
-                        self._handle_rx(pkt)
-                    except Exception as e:
-                        self._bad_rx += 1
-                        logging.warning("RX handler error (bad_rx=%d): %r", self._bad_rx, e)
+                    self._handle_rx(pkt)
         except Exception as e:
             self._bad_rx += 1
             logging.warning("Receive poll failed (bad_rx=%d): %r", self._bad_rx, e)
 
         self._soft_watchdog()
-
-        if self._tick_counter % int(max(1, TICK_HZ * 10)) == 0:
-            logging.debug(
-                "tick: motion_q=%d image_q=%d bad_rx=%d cap_alive=%s inf_alive=%s sn_alive=%s cap_inprog=%s inf_inprog=%s",
-                self._motion_q.qsize(),
-                self._image_q.qsize(),
-                self._bad_rx,
-                self._capture_thread.is_alive(),
-                self._infer_thread.is_alive(),
-                self._speciesnet_thread.is_alive(),
-                self._capture_in_progress,
-                self._infer_in_progress,
-            )
 
     def _handle_rx(self, pkt) -> None:
         logging.info(
@@ -535,25 +654,22 @@ class WildDuck(Duck):
             )
             self._speciesnet_thread.start()
 
-        if self._motion_q.qsize() > 50:
-            self._drain_queue(self._motion_q, "motion_q", max_items=1000)
-
-        if self._image_q.qsize() > 20:
-            self._drain_queue(self._image_q, "image_q", max_items=1000)
+        # Camera worker health
+        try:
+            self._camera.start()
+        except Exception as e:
+            logging.error("Camera worker unhealthy; restart failed: %r", e)
 
         if self._capture_in_progress and (now - self._capture_start_ts) > self._capture_stuck_s:
             logging.error("Capture stuck: in_progress for %.1fs", now - self._capture_start_ts)
-            self._drain_queue(self._motion_q, "motion_q", max_items=1000)
 
         if self._infer_in_progress and (now - self._infer_start_ts) > self._infer_stuck_s:
             logging.error("Inference stuck: in_progress for %.1fs", now - self._infer_start_ts)
-            self._drain_queue(self._image_q, "image_q", max_items=1000)
 
     def _hard_watchdog_loop(self):
-        # Pi Zero 2W: longer thresholds
-        TICK_DEAD_S = 60.0                    # was 10.0
-        CAPTURE_HARD_STUCK_S = CAMERA_TIMEOUT_S + 60  # was CAMERA_TIMEOUT_S + 30
-        INFER_HARD_STUCK_S = 15 * 60          # was 75
+        TICK_DEAD_S = 60.0
+        CAPTURE_HARD_STUCK_S = CAMERA_TIMEOUT_S + 60
+        INFER_HARD_STUCK_S = 15 * 60
 
         while self._alive:
             time.sleep(2.0)
@@ -567,31 +683,11 @@ class WildDuck(Duck):
                 logging.critical("HARD WATCHDOG: capture wedged for %.1fs. Exiting.", now - self._capture_start_ts)
                 os._exit(102)
 
-            if (
-                self._infer_in_progress
-                and self._image_q.qsize() > 0
-                and (now - self._infer_start_ts) > INFER_HARD_STUCK_S
-            ):
-                logging.critical(
-                    "HARD WATCHDOG: inference wedged for %.1fs with backlog=%d. Exiting.",
-                    now - self._infer_start_ts,
-                    self._image_q.qsize(),
-                )
+            if self._infer_in_progress and (now - self._infer_start_ts) > INFER_HARD_STUCK_S:
+                logging.critical("HARD WATCHDOG: inference wedged for %.1fs. Exiting.", now - self._infer_start_ts)
                 os._exit(103)
 
-    @staticmethod
-    def _drain_queue(q: "queue.Queue", name: str, max_items: int = 1000) -> None:
-        n = 0
-        try:
-            while n < max_items:
-                q.get_nowait()
-                n += 1
-        except queue.Empty:
-            pass
-        if n:
-            logging.warning("Drained %d items from %s", n, name)
-
-    # ---- Worker: capture ----
+    # ---- capture worker ----
     def _capture_worker_loop(self):
         while self._alive:
             try:
@@ -601,7 +697,6 @@ class WildDuck(Duck):
 
             now = time.time()
             if MIN_CAPTURE_INTERVAL > 0.0 and (now - self._last_capture_ts) < MIN_CAPTURE_INTERVAL:
-                logging.debug("Skipping capture due to MIN_CAPTURE_INTERVAL")
                 continue
 
             image_path = _timestamped_image_path()
@@ -609,41 +704,22 @@ class WildDuck(Duck):
             self._capture_in_progress = True
             self._capture_start_ts = t0
             try:
-                logging.info("Capturing image -> %s", image_path)
-                _run_camera_cli_capture(image_path)
-                dt = time.time() - t0
-                logging.info("Camera capture finished in %.2fs -> %s", dt, image_path)
-
+                self._camera.capture(image_path, timeout_s=CAMERA_CAPTURE_CMD_TIMEOUT_S)
                 self._image_q.put(image_path)
                 self._last_capture_ts = now
-                self._last_capture_done_ts = time.time()
-            except subprocess.TimeoutExpired:
-                logging.error("Camera capture timed out (killed process group)")
-            except subprocess.CalledProcessError as e:
-                logging.error("Camera capture failed: %s", e)
-            except Exception:
-                logging.exception("Unexpected error in capture worker")
+            except Exception as e:
+                logging.error("Camera capture failed: %r", e)
             finally:
                 self._capture_in_progress = False
 
-    # ---- Worker: SpeciesNet model (resident) ----
+    # ---- SpeciesNet worker (resident) ----
     def _speciesnet_worker_loop(self):
-        """
-        Dedicated worker that keeps SpeciesNet model loaded and serves inference requests.
-        """
         model = None
         try:
             if str(PIPELINE_DIR) not in sys.path:
                 sys.path.insert(0, str(PIPELINE_DIR))
 
             from speciesnet.multiprocessing import SpeciesNet  # type: ignore
-
-            if self._deploy_mode:
-                try:
-                    from absl import logging as absl_logging  # type: ignore
-                    absl_logging.set_verbosity(absl_logging.ERROR)
-                except Exception:
-                    pass
 
             logging.info("Loading SpeciesNet model (resident): %s", self._speciesnet_model_name)
             model = SpeciesNet(self._speciesnet_model_name, multiprocessing=False)
@@ -671,7 +747,7 @@ class WildDuck(Duck):
                     admin1_region=task.admin1_region,
                     run_mode="single_thread",
                     progress_bars=False,
-                    predictions_json=None,  # keep in-memory
+                    predictions_json=None,
                 )
                 if preds is None:
                     raise RuntimeError("SpeciesNet.predict returned None unexpectedly")
@@ -680,35 +756,12 @@ class WildDuck(Duck):
                 task.result_q.put(_SpeciesNetResult(predictions=None, error=e))
 
     def _speciesnet_predict(self, image_path: Path) -> dict:
-        """
-        Get predictions from the resident SpeciesNet worker thread.
-
-        Deploy mode requirement: do NOT write JSON.
-        Therefore:
-          - In deploy mode, if resident model init fails, we hard-exit to let systemd restart.
-          - In test mode, we can fall back to detect.py and write JSON as before.
-        """
         if not self._speciesnet_ready.is_set():
             if not self._speciesnet_ready.wait(timeout=INFER_TIMEOUT_S):
-                logging.error("Resident SpeciesNet init timed out")
-                if self._deploy_mode:
-                    logging.critical("Deploy mode requires resident model; exiting for restart.")
-                    os._exit(130)
-                # test mode fallback
-                json_path = _speciesnet_json_for_image(image_path)
-                _run_speciesnet_cli(image_path, predictions_json=json_path)
-                with json_path.open("r", encoding="utf-8") as f:
-                    return json.load(f)
+                raise TimeoutError("Resident SpeciesNet init timed out")
 
         if self._speciesnet_init_error is not None:
-            if self._deploy_mode:
-                logging.critical("Deploy mode requires resident model; init failed: %r", self._speciesnet_init_error)
-                os._exit(131)
-            # test mode fallback
-            json_path = _speciesnet_json_for_image(image_path)
-            _run_speciesnet_cli(image_path, predictions_json=json_path)
-            with json_path.open("r", encoding="utf-8") as f:
-                return json.load(f)
+            raise self._speciesnet_init_error
 
         result_q: "queue.Queue[_SpeciesNetResult]" = queue.Queue(maxsize=1)
         task = _SpeciesNetTask(
@@ -717,30 +770,15 @@ class WildDuck(Duck):
             admin1_region=DEFAULT_ADMIN1,
             result_q=result_q,
         )
-        try:
-            self._speciesnet_q.put(task, timeout=2.0)
-        except queue.Full:
-            logging.error("SpeciesNet queue full")
-            if self._deploy_mode:
-                logging.critical("Deploy mode requires resident inference availability; exiting for restart.")
-                os._exit(132)
-            # test mode fallback
-            json_path = _speciesnet_json_for_image(image_path)
-            _run_speciesnet_cli(image_path, predictions_json=json_path)
-            with json_path.open("r", encoding="utf-8") as f:
-                return json.load(f)
+        self._speciesnet_q.put(task)
 
-        try:
-            result = result_q.get(timeout=INFER_TIMEOUT_S)
-        except queue.Empty as e:
-            raise subprocess.TimeoutExpired(cmd="SpeciesNet(resident)", timeout=INFER_TIMEOUT_S) from e
-
+        result = result_q.get(timeout=INFER_TIMEOUT_S)
         if result.error is not None:
             raise result.error
         assert result.predictions is not None
         return result.predictions
 
-    # ---- Worker: inference + TX ----
+    # ---- inference + TX ----
     def _inference_worker_loop(self):
         while self._alive:
             try:
@@ -748,38 +786,21 @@ class WildDuck(Duck):
             except queue.Empty:
                 continue
 
-            t0 = time.time()
             self._infer_in_progress = True
-            self._infer_start_ts = t0
+            self._infer_start_ts = time.time()
 
-            # In test mode we save JSON like before; in deploy we do not.
             json_path: Optional[Path] = _speciesnet_json_for_image(image_path) if self._test_mode else None
 
             try:
                 predictions = self._speciesnet_predict(image_path)
 
-                # TEST MODE: write JSON results to disk (as before)
                 if self._test_mode and json_path is not None:
                     json_path.parent.mkdir(parents=True, exist_ok=True)
                     with json_path.open("w", encoding="utf-8") as f:
                         json.dump(predictions, f, ensure_ascii=False, indent=1)
 
                 species, conf = _parse_species_from_predictions(image_path, predictions)
-
-                logging.info("SpeciesNet result: %s (%.3f)", species, conf)
-                if self._test_mode:
-                    print(f"Detected species: {species} (confidence={conf:.3f})")
-
-                # If below min confidence, skip TX
                 if conf < float(DEFAULT_MIN_CONF):
-                    logging.info(
-                        "Below min confidence (%.3f < %.3f); skipping TX for %s",
-                        conf,
-                        float(DEFAULT_MIN_CONF),
-                        image_path.name,
-                    )
-                    if self._test_mode:
-                        print(f"Skipping TX: conf {conf:.3f} below min_conf {float(DEFAULT_MIN_CONF):.3f}")
                     continue
 
                 ts_iso = datetime.utcnow().isoformat() + "Z"
@@ -791,34 +812,19 @@ class WildDuck(Duck):
                     max_bytes=RADIO_MAX_PAYLOAD,
                 )
 
-                if self._test_mode:
-                    wire_json_str = json.dumps(payload_obj, separators=(",", ":"), ensure_ascii=False)
-                    logging.info("TX JSON (len=%d): %s", len(payload_bytes), wire_json_str)
-                    logging.info("TX bytes=%d raw=%r", len(payload_bytes), payload_bytes)
-                    logging.info("TX hex=%s", payload_bytes.hex())
-
-                # Send to Papa (or configured destination)
                 self.send(self._target_duid, Topic.WILD, UnknownData(payload_bytes))
-                logging.info("Sent WILD payload to dduid=%s", self._target_duid.hex())
 
-                dt = time.time() - t0
-                logging.info("Inference finished in %.2fs for %s", dt, image_path.name)
-                self._last_infer_done_ts = time.time()
+                if self._test_mode:
+                    logging.info("TX: %s", json.dumps(payload_obj, separators=(",", ":"), ensure_ascii=False))
 
-            except subprocess.TimeoutExpired:
-                logging.error("SpeciesNet timed out for %s", image_path)
-            except subprocess.CalledProcessError as e:
-                logging.error("SpeciesNet subprocess error: %s", e)
             except Exception:
-                logging.exception("Unexpected error in inference worker")
+                logging.exception("Inference worker error")
             finally:
-                # DEPLOY MODE: always delete image (and any json_path, if ever created) regardless of success/failure.
                 if self._deploy_mode:
                     _safe_unlink(image_path)
                     _safe_unlink(json_path)
                 self._infer_in_progress = False
 
-    # ---- cleanup ----
     def close(self):
         self._alive = False
 
@@ -832,6 +838,11 @@ class WildDuck(Duck):
             pass
         try:
             self._speciesnet_thread.join(timeout=1.0)
+        except Exception:
+            pass
+
+        try:
+            self._camera.stop()
         except Exception:
             pass
 
@@ -859,8 +870,6 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=None,
         help="SpeciesNet model identifier or local model folder. Defaults to $SPECIESNET_MODEL or speciesnet.DEFAULT_MODEL.",
     )
-
-    # DUID args: use hex strings (8 bytes = 16 hex chars). normalize_duid() converts.
     p.add_argument(
         "--duid",
         default="0x0000000000000539",
@@ -871,13 +880,16 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default="0x0000000000000000",
         help="Destination Duck DUID as hex (8 bytes). Papa default is 0x0000000000000000",
     )
+    p.add_argument("--camera-worker", action="store_true", help=argparse.SUPPRESS)
     return p.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = _parse_args()
 
-    # In test mode, keep existing verbosity. In deploy, suppress info/debug spam.
+    if getattr(args, "camera_worker", False):
+        raise SystemExit(camera_worker_main())
+
     log_level = logging.INFO if args.mode == "test" else logging.WARNING
     logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(message)s")
 

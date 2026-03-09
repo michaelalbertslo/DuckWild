@@ -217,8 +217,15 @@ def _run_with_timeout_killpg(cmd: list[str], *, cwd: str | None, timeout_s: floa
 
 
 def _run_camera_cli_capture(output_path: Path) -> None:
-    cmd = [sys.executable, str(CAMERA_CLI), "photo", "-o", str(output_path)]
-    logging.info("Running camera CLI: %s", " ".join(cmd))
+    cmd = [
+        "libcamera-still",
+        "-n",
+        "--immediate",
+        "--width", "1024",
+        "--height", "768",
+        "-o", str(output_path),
+    ]
+    logging.info("Running camera: %s", " ".join(cmd))
     _run_with_timeout_killpg(cmd, cwd=None, timeout_s=CAMERA_TIMEOUT_S)
 
 
