@@ -623,7 +623,7 @@ class WildDuck(Duck):
 
     def _hard_watchdog_loop(self):
         # (leave as-is; you can tune further)
-        TICK_DEAD_S = 10.0
+        TICK_DEAD_S = 60.0 * 3
         CAPTURE_HARD_STUCK_S = CAMERA_TIMEOUT_S + 30
         INFER_HARD_STUCK_S = 15 * 60
 
