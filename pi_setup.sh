@@ -9,8 +9,9 @@ echo ""
 
 # ── Package Installation ──────────────────────────────────────────────────────
 
-echo "[1/5] Installing apt packages..."
-sudo apt update -y
+echo "[1/4] Installing apt packages..."
+sudo apt-get update -y
+sudo apt-get -y upgrade
 
 sudo apt install -y swig
 echo "  ✓ swig"
@@ -27,7 +28,7 @@ echo "  ✓ python3-picamera2"
 # ── Install uv ────────────────────────────────────────────────────────────────
 
 echo ""
-echo "[2/5] Installing uv..."
+echo "[2/4] Installing uv..."
 curl -LsSf https://astral.sh/uv/install.sh | sh
 echo "  ✓ uv installed"
 
@@ -37,7 +38,7 @@ export PATH="$HOME/.local/bin:$PATH"
 # ── Enable SPI ────────────────────────────────────────────────────────────────
 
 echo ""
-echo "[3/5] Enabling SPI..."
+echo "[3/4] Enabling SPI..."
 
 CONFIG_FILE="/boot/firmware/config.txt"
 
@@ -61,24 +62,10 @@ else
     fi
 fi
 
-# ── Clone DuckWild Repo ───────────────────────────────────────────────────────
-
-echo ""
-echo "[4/5] Cloning DuckWild repository..."
-
-DUCK_DIR="$HOME/DuckWild"
-
-if [ -d "$DUCK_DIR" ]; then
-    echo "  ! ~/DuckWild already exists, skipping clone"
-else
-    git clone https://github.com/michaelalbertslo/DuckWild "$DUCK_DIR"
-    echo "  ✓ Cloned into ~/DuckWild"
-fi
-
 # ── Create & Enable systemd Service ──────────────────────────────────────────
 
 echo ""
-echo "[5/5] Creating wildduck systemd service..."
+echo "[4/4] Creating wildduck systemd service..."
 
 # Resolve paths from the current user's environment
 SERVICE_USER="$(whoami)"
