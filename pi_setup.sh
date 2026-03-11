@@ -87,6 +87,7 @@ DUCKWILD_DIR="${USER_DIR}/DuckWild"
 UV_PATH="${USER_DIR}/.local/bin/uv"
 STARTUP_SCRIPT="${DUCKWILD_DIR}/wild_duck.py"
 SERVICE_FILE="/etc/systemd/system/wildduck.service"
+FLAGS="--no-group dev"
 
 sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
@@ -99,7 +100,7 @@ After=multi-user.target
 Type=simple
 User=${SERVICE_USER}
 WorkingDirectory=${DUCKWILD_DIR}
-ExecStart=${UV_PATH} run ${STARTUP_SCRIPT}
+ExecStart=${UV_PATH} run ${FLAGS} ${STARTUP_SCRIPT}
 
 # Restart only when the program crashes or exits non-zero. Wait 2 seconds before restarting.
 Restart=on-failure
