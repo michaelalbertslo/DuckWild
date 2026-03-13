@@ -11,6 +11,11 @@ Changes:
 BUGFIX:
 - Radio TX must be single-threaded. Do NOT call self.send() from worker threads.
   Instead, enqueue TX requests and transmit from tick() (main Duck thread).
+
+PRIVACY CHANGE:
+- If SpeciesNet predicts a human/person, DO NOT transmit.
+  Instead: print "no message sent, human detected, data deleted"
+  and delete the captured image + any saved prediction JSON (even in test mode).
 """
 
 import argparse
@@ -118,6 +123,31 @@ def normalize_duid(v) -> bytes:
             raise ValueError(f"DUID must be 8 bytes, got {len(b)}")
         return b
     raise TypeError(f"Unsupported DUID type: {type(v)}")
+
+
+# ----------------------------
+# Human detection helper
+# ----------------------------
+def _is_human_species(species: str) -> bool:
+    """
+    SpeciesNet prediction strings in this project often look like:
+      "<uuid>;<taxon1>;<taxon2>;...;<common_name>"
+    Be conservative: treat anything containing person/human/homo sapiens as human.
+    """
+    s = (species or "").strip().lower()
+    if not s:
+        return False
+
+    # Quick substring checks
+    if "human" in s or "person" in s or "people" in s:
+        return True
+    if "homo sapiens" in s or "homo_sapiens" in s:
+        return True
+
+    # Token checks (semicolon-separated taxonomy strings)
+    toks = [t.strip().lower() for t in s.split(";") if t.strip()]
+    human_tokens = {"human", "person", "people", "homo sapiens", "homo_sapiens"}
+    return any(t in human_tokens for t in toks)
 
 
 # ----------------------------
@@ -623,7 +653,7 @@ class WildDuck(Duck):
 
     def _hard_watchdog_loop(self):
         # (leave as-is; you can tune further)
-        TICK_DEAD_S = 60.0 * 3
+        TICK_DEAD_S = 10.0
         CAPTURE_HARD_STUCK_S = CAMERA_TIMEOUT_S + 30
         INFER_HARD_STUCK_S = 15 * 60
 
@@ -809,20 +839,31 @@ class WildDuck(Duck):
             self._infer_in_progress = True
             self._infer_start_ts = t0
 
+            # Test mode would normally save this; we will NOT save if human is detected.
             json_path: Optional[Path] = _speciesnet_json_for_image(image_path) if self._test_mode else None
+
+            # Delete policy: normally only in deploy mode, but ALSO delete when human is detected.
+            delete_after = self._deploy_mode
 
             try:
                 predictions = self._speciesnet_predict(image_path)
-
-                if self._test_mode and json_path is not None:
-                    json_path.parent.mkdir(parents=True, exist_ok=True)
-                    with json_path.open("w", encoding="utf-8") as f:
-                        json.dump(predictions, f, ensure_ascii=False, indent=1)
-
                 species, conf = _parse_species_from_predictions(image_path, predictions)
 
                 if conf < float(DEFAULT_MIN_CONF):
                     continue
+
+                # PRIVACY: if human/person detected, do not TX; delete data.
+                if _is_human_species(species):
+                    delete_after = True
+                    print("no message sent, human detected, data deleted")
+                    logging.info('no message sent, human detected, data deleted (species="%s", conf=%.4f)', species, conf)
+                    continue
+
+                # Only write debug JSON for non-human detections
+                if self._test_mode and json_path is not None:
+                    json_path.parent.mkdir(parents=True, exist_ok=True)
+                    with json_path.open("w", encoding="utf-8") as f:
+                        json.dump(predictions, f, ensure_ascii=False, indent=1)
 
                 ts_iso = datetime.utcnow().isoformat() + "Z"
                 payload_bytes, payload_obj = _build_wild_payload(
@@ -851,7 +892,7 @@ class WildDuck(Duck):
             except Exception:
                 logging.exception("Unexpected error in inference worker")
             finally:
-                if self._deploy_mode:
+                if delete_after:
                     _safe_unlink(image_path)
                     _safe_unlink(json_path)
                 self._infer_in_progress = False
