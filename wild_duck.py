@@ -933,7 +933,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="DuckWild PIR -> capture -> SpeciesNet -> radio TX")
     p.add_argument("--mode", choices=("test", "deploy"), default="test")
     p.add_argument("--speciesnet-model", default=None)
-    p.add_argument("--duid", default="0x0000000000000539")
+    p.add_argument("--duid", default="0x514a30375a473233")
     p.add_argument("--target-duid", default="0x0000000000000000")
     return p.parse_args(argv)
 
