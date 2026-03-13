@@ -7,6 +7,15 @@ DuckWild - decoupled PIR -> capture -> inference -> TX
 Changes:
 - Use persistent camera_cli.py "server" subprocess (Picamera2 stays warm)
   to make motion->capture fast on Pi Zero 2 W.
+
+BUGFIX:
+- Radio TX must be single-threaded. Do NOT call self.send() from worker threads.
+  Instead, enqueue TX requests and transmit from tick() (main Duck thread).
+
+PRIVACY CHANGE:
+- If SpeciesNet predicts a human/person, DO NOT transmit.
+  Instead: print "no message sent, human detected, data deleted"
+  and delete the captured image + any saved prediction JSON (even in test mode).
 """
 
 import argparse
@@ -114,6 +123,31 @@ def normalize_duid(v) -> bytes:
             raise ValueError(f"DUID must be 8 bytes, got {len(b)}")
         return b
     raise TypeError(f"Unsupported DUID type: {type(v)}")
+
+
+# ----------------------------
+# Human detection helper
+# ----------------------------
+def _is_human_species(species: str) -> bool:
+    """
+    SpeciesNet prediction strings in this project often look like:
+      "<uuid>;<taxon1>;<taxon2>;...;<common_name>"
+    Be conservative: treat anything containing person/human/homo sapiens as human.
+    """
+    s = (species or "").strip().lower()
+    if not s:
+        return False
+
+    # Quick substring checks
+    if "human" in s or "person" in s or "people" in s:
+        return True
+    if "homo sapiens" in s or "homo_sapiens" in s:
+        return True
+
+    # Token checks (semicolon-separated taxonomy strings)
+    toks = [t.strip().lower() for t in s.split(";") if t.strip()]
+    human_tokens = {"human", "person", "people", "homo sapiens", "homo_sapiens"}
+    return any(t in human_tokens for t in toks)
 
 
 # ----------------------------
@@ -273,6 +307,7 @@ def _default_speciesnet_model_name() -> str:
         return str(PIPELINE_DIR)
     try:
         from speciesnet import DEFAULT_MODEL  # type: ignore
+
         return str(DEFAULT_MODEL)
     except Exception:
         return "kaggle:google/speciesnet/pyTorch/v4.0.2a/1"
@@ -444,6 +479,9 @@ class WildDuck(Duck):
 
         self._speciesnet_q: "queue.Queue[_SpeciesNetTask]" = queue.Queue(maxsize=8)
 
+        # BUGFIX: all radio TX requests go through this queue and are sent from tick() only.
+        self._tx_q: "queue.Queue[tuple[bytes, Topic, UnknownData]]" = queue.Queue(maxsize=32)
+
         self._bad_rx = 0
         self._last_tick_ts = time.time()
         self._last_motion_ts = 0.0
@@ -456,7 +494,7 @@ class WildDuck(Duck):
         self._infer_start_ts = 0.0
 
         self._capture_stuck_s = float(CAMERA_TIMEOUT_S + 10)
-        self._infer_stuck_s = 10 * 60.0  # slower device
+        self._infer_stuck_s = 10 * 60.0  # leave as-is
 
         self._last_capture_ts = 0.0
 
@@ -528,6 +566,7 @@ class WildDuck(Duck):
         self._tick_counter += 1
         self._last_tick_ts = time.time()
 
+        # RX poll (main thread)
         try:
             if hasattr(self, "try_receive_nowait"):
                 pkt = self.try_receive_nowait()  # type: ignore[attr-defined]
@@ -540,6 +579,17 @@ class WildDuck(Duck):
         except Exception as e:
             self._bad_rx += 1
             logging.warning("Receive poll failed (bad_rx=%d): %r", self._bad_rx, e)
+
+        # BUGFIX: TX drain from main thread only (radio stack is often not thread-safe)
+        for _ in range(3):  # limit per tick
+            try:
+                dduid, topic, data = self._tx_q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self.send(dduid, topic, data)
+            except Exception:
+                logging.exception("Radio TX failed")
 
         self._soft_watchdog()
 
@@ -579,7 +629,7 @@ class WildDuck(Duck):
             )
             self._speciesnet_thread.start()
 
-        # NEW: keep camera server alive (restart only if dead)
+        # keep camera server alive (restart only if dead)
         if not self._camera.is_alive():
             logging.error("camera server died; restarting")
             try:
@@ -662,7 +712,7 @@ class WildDuck(Duck):
             try:
                 logging.info("Capturing image -> %s", image_path)
 
-                # NEW: fast capture via persistent camera server
+                # fast capture via persistent camera server
                 self._camera.capture(image_path)
 
                 dt = time.time() - t0
@@ -688,6 +738,7 @@ class WildDuck(Duck):
             if self._deploy_mode:
                 try:
                     from absl import logging as absl_logging  # type: ignore
+
                     absl_logging.set_verbosity(absl_logging.ERROR)
                 except Exception:
                     pass
@@ -776,7 +827,7 @@ class WildDuck(Duck):
         assert result.predictions is not None
         return result.predictions
 
-    # ---- Worker: inference + TX ----
+    # ---- Worker: inference + enqueue TX ----
     def _inference_worker_loop(self):
         while self._alive:
             try:
@@ -788,20 +839,31 @@ class WildDuck(Duck):
             self._infer_in_progress = True
             self._infer_start_ts = t0
 
+            # Test mode would normally save this; we will NOT save if human is detected.
             json_path: Optional[Path] = _speciesnet_json_for_image(image_path) if self._test_mode else None
+
+            # Delete policy: normally only in deploy mode, but ALSO delete when human is detected.
+            delete_after = self._deploy_mode
 
             try:
                 predictions = self._speciesnet_predict(image_path)
-
-                if self._test_mode and json_path is not None:
-                    json_path.parent.mkdir(parents=True, exist_ok=True)
-                    with json_path.open("w", encoding="utf-8") as f:
-                        json.dump(predictions, f, ensure_ascii=False, indent=1)
-
                 species, conf = _parse_species_from_predictions(image_path, predictions)
 
                 if conf < float(DEFAULT_MIN_CONF):
                     continue
+
+                # PRIVACY: if human/person detected, do not TX; delete data.
+                if _is_human_species(species):
+                    delete_after = True
+                    print("no message sent, human detected, data deleted")
+                    logging.info('no message sent, human detected, data deleted (species="%s", conf=%.4f)', species, conf)
+                    continue
+
+                # Only write debug JSON for non-human detections
+                if self._test_mode and json_path is not None:
+                    json_path.parent.mkdir(parents=True, exist_ok=True)
+                    with json_path.open("w", encoding="utf-8") as f:
+                        json.dump(predictions, f, ensure_ascii=False, indent=1)
 
                 ts_iso = datetime.utcnow().isoformat() + "Z"
                 payload_bytes, payload_obj = _build_wild_payload(
@@ -815,7 +877,14 @@ class WildDuck(Duck):
                 if self._test_mode:
                     logging.info("TX: %s", json.dumps(payload_obj, separators=(",", ":"), ensure_ascii=False))
 
-                self.send(self._target_duid, Topic.WILD, UnknownData(payload_bytes))
+                # BUGFIX: enqueue TX; main thread will call self.send()
+                try:
+                    self._tx_q.put(
+                        (self._target_duid, Topic.WILD, UnknownData(payload_bytes)),
+                        timeout=1.0,
+                    )
+                except queue.Full:
+                    logging.error("TX queue full; dropping TX for %s", image_path.name)
 
                 self._last_infer_done_ts = time.time()
                 logging.info("Inference finished in %.2fs for %s", time.time() - t0, image_path.name)
@@ -823,7 +892,7 @@ class WildDuck(Duck):
             except Exception:
                 logging.exception("Unexpected error in inference worker")
             finally:
-                if self._deploy_mode:
+                if delete_after:
                     _safe_unlink(image_path)
                     _safe_unlink(json_path)
                 self._infer_in_progress = False
@@ -873,7 +942,10 @@ if __name__ == "__main__":
     args = _parse_args()
 
     log_level = logging.INFO if args.mode == "test" else logging.WARNING
-    logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(message)s")
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s",
+    )
 
     duck = WildDuck(
         duid=normalize_duid(args.duid),
